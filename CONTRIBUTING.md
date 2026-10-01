@@ -60,7 +60,9 @@ Important design decisions are recorded as ADRs in `docs/adr/` using the file na
   packages, run `npm run deps:check -- --write` and commit `docs/runtime-dependencies.txt`; CI
   fails otherwise.
 
-- Nix inputs are updated deliberately with `nix flake update`, in a dedicated pull request.
+- Nix inputs are updated deliberately with `nix flake update`, in a dedicated pull request. A
+  change of Node.js (and therefore SQLite) must pass the storage-contract tests in CI and be
+  compared with `npm run bench:storage`; see [ADR 0009](docs/adr/0009-storage-contract.md#sqlite-compatibility).
 - JavaScript dependencies are updated by Dependabot (grouped, with a cooldown). Do not mix manual dependency bumps into feature pull requests.
 
 ## Issues and secrets

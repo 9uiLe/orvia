@@ -27,7 +27,9 @@ session identifiers are neither public nor stable.
   `splitFromWorkItemId`; the Plan stays the same.
 - A Work Item may exist before it has a worktree or a PR.
 - Work Item states: `active` ⇄ `paused` → `completed` → `archived` (and `active`/`paused` →
-  `archived`). Pausing cancels a running agent. Only `active`, bound Work Items can run.
+  `archived`). Pausing stops the running agent's whole process tree before the Work Item
+  becomes `paused` ([ADR 0008](0008-agent-process-lifecycle.md)). Only `active`, bound Work
+  Items can run.
 
 ### Explicit identity
 

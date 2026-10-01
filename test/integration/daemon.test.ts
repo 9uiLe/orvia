@@ -54,6 +54,7 @@ describe('daemon ownership and IPC', () => {
           backupDir: env.paths.backupDir,
           migrations: MIGRATIONS,
           now: () => new Date(),
+          databaseMaxBytes: 128 * 1024 * 1024,
         }),
       { code: 'DATABASE_LOCKED' },
     );

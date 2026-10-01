@@ -12,7 +12,7 @@ import {
 import { identityFromObservation } from '../domain/workspace.ts';
 import { nowIso, type Dependencies } from './dependencies.ts';
 import { requirePlan } from './plans.ts';
-import type { WorktreeEntry } from './ports.ts';
+import type { TransactionMode, WorktreeEntry } from './ports.ts';
 
 export interface WorkItemDetails {
   readonly workItem: WorkItem;
@@ -20,8 +20,8 @@ export interface WorkItemDetails {
   readonly runs: AgentRun[];
 }
 
-export interface RunCanceller {
-  cancelForWorkItem(workItemId: WorkItemId): boolean;
+export interface RunControl {
+  pause<T>(workItemId: WorkItemId, commit: () => T): Promise<T>;
 }
 
 export function requireWorkItem(deps: Dependencies, workItemId: WorkItemId): WorkItem {
@@ -144,16 +144,20 @@ export async function bindWorkspace(
   });
 }
 
+/** Resume and archive are human controls that must work at HARD_LIMIT; completing is a write. */
+function transactionModeFor(kind: Exclude<WorkItemTransition, 'pause'>): TransactionMode {
+  return kind === 'complete' ? 'write' : 'reserve';
+}
+
 export function transition(
   deps: Dependencies,
-  runs: RunCanceller,
   input: { workItemId: WorkItemId },
-  kind: WorkItemTransition,
+  kind: Exclude<WorkItemTransition, 'pause'>,
 ): WorkItem {
-  const updated = deps.store.transaction(() => {
+  return deps.store.transaction(() => {
     const item = requireWorkItem(deps, input.workItemId);
     const status = transitionWorkItem(item, kind);
-    if ((kind === 'complete' || kind === 'archive') && deps.store.runs.current(item.id) !== null) {
+    if (kind !== 'resume' && deps.store.runs.current(item.id) !== null) {
       throw new OrviaError(
         'RUN_IN_PROGRESS',
         `work item ${item.id} has a running agent; pause it first`,
@@ -161,9 +165,23 @@ export function transition(
       );
     }
     return deps.store.workItems.update(item.id, { status }, nowIso(deps));
-  });
-  if (kind === 'pause') runs.cancelForWorkItem(updated.id);
-  return updated;
+  }, transactionModeFor(kind));
+}
+
+/** Returns once the Work Item's agent process tree has stopped and the Work Item is paused. */
+export async function pauseWorkItem(
+  deps: Dependencies,
+  runs: RunControl,
+  input: { workItemId: WorkItemId },
+): Promise<WorkItem> {
+  transitionWorkItem(requireWorkItem(deps, input.workItemId), 'pause');
+  return runs.pause(input.workItemId, () =>
+    deps.store.transaction(() => {
+      const item = requireWorkItem(deps, input.workItemId);
+      const status = transitionWorkItem(item, 'pause');
+      return deps.store.workItems.update(item.id, { status }, nowIso(deps));
+    }, 'reserve'),
+  );
 }
 
 export interface DiscoveredWorktree extends WorktreeEntry {

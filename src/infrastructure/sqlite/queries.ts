@@ -55,8 +55,8 @@ export const WRITE_STATEMENTS = {
     VALUES (?, ?, 'running', ?, ?)`,
   finishRun: `UPDATE runs SET status = ?, exit_code = ?, output_bytes = ?, output_truncated = ?,
     finished_at = ? WHERE id = ? AND status = 'running'`,
-  interruptRunningRuns: `UPDATE runs SET status = 'interrupted', finished_at = ?
-    WHERE status = 'running' RETURNING id`,
+  interruptRun: `UPDATE runs SET status = 'interrupted', finished_at = ?
+    WHERE id = ? AND status = 'running'`,
   finishedRunsBeyondKeep: `SELECT id, output_ref FROM (
       SELECT id, output_ref,
         row_number() OVER (PARTITION BY work_item_id ORDER BY id DESC) AS position

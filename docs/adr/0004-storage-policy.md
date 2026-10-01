@@ -38,7 +38,9 @@ counts.
 }
 ```
 
-`database_max_mb` covers state.db, WAL, SHM, and migration backups. `cache_max_mb` covers
+`database_max_mb` is a hard budget for state.db, its rollback journal, any leftover WAL or SHM,
+and the backup directory; its exact meaning and enforcement are in
+[ADR 0009](0009-storage-contract.md). `cache_max_mb` covers
 everything under the cache directory. `retention_days` applies to cache entries and migration
 backups. Cleanup starts at `pressure_percent`, and status reports `WARNING` at `warning_percent`.
 
@@ -53,33 +55,37 @@ reserve.
 
 ### Pressure levels
 
-For each area (database, cache):
+| Level        | Database: data (pages × page size) vs. write capacity | Cache: bytes vs. `cache_max_mb` | Effect                          |
+| ------------ | ----------------------------------------------------- | ------------------------------- | ------------------------------- |
+| `NORMAL`     | below `pressure_percent`                              | below `pressure_percent`        | —                               |
+| `PRESSURE`   | ≥ `pressure_percent`                                  | ≥ `pressure_percent`            | cleanup starts automatically    |
+| `WARNING`    | ≥ `warning_percent`                                   | ≥ `warning_percent`             | reported in status              |
+| `HARD_LIMIT` | ≥ write capacity                                      | ≥ limit                         | new writes / agent runs refused |
 
-| Level        | Condition                         | Effect                          |
-| ------------ | --------------------------------- | ------------------------------- |
-| `NORMAL`     | below `pressure_percent`          | —                               |
-| `PRESSURE`   | ≥ `pressure_percent` of the limit | cleanup starts automatically    |
-| `WARNING`    | ≥ `warning_percent`               | reported in status              |
-| `HARD_LIMIT` | ≥ limit − reserve                 | new writes / agent runs refused |
+The database **write capacity** is the data size at which ordinary writes stop. It leaves room
+for each transaction's worst-case rollback journal and for a **control and maintenance reserve**:
+the pages that pausing, recording a run's result, cleanup, or archiving can add, derived from
+b-tree depth ([ADR 0009](0009-storage-contract.md)). The cache needs no reserve because relieving
+it only deletes files.
 
-The database **maintenance reserve** is one WAL checkpoint interval
-(`wal_autocheckpoint × page_size`, 4,096,000 bytes with SQLite defaults): the WAL can grow by up
-to that much before a checkpoint, and cleanup needs to be able to write it. The cache needs no
-reserve because relieving it only deletes files.
+Admission at `HARD_LIMIT` (the pre-operation gate):
 
-At `HARD_LIMIT`:
+| Operation class                                             | Database at HARD_LIMIT | Cache at HARD_LIMIT |
+| ----------------------------------------------------------- | ---------------------- | ------------------- |
+| read (status, storage status, lists)                        | allowed                | allowed             |
+| control (pause, resume)                                     | allowed                | allowed             |
+| maintenance (cleanup; archive, which frees almost no space) | allowed                | allowed             |
+| write (create, update, context, decisions, feedback, bind)  | refused                | allowed             |
+| agent_run (`start_run`)                                     | refused                | refused             |
 
-| Operation class                                            | Database at HARD_LIMIT | Cache at HARD_LIMIT |
-| ---------------------------------------------------------- | ---------------------- | ------------------- |
-| read (status, storage status, lists)                       | allowed                | allowed             |
-| control (pause, resume)                                    | allowed                | allowed             |
-| maintenance (cleanup, archive)                             | allowed                | allowed             |
-| write (create, update, context, decisions, feedback, bind) | refused                | allowed             |
-| agent_run (`start_run`)                                    | refused                | refused             |
+Allowed classes are not refused by the gate, but their transactions can still fail once the
+shared reserve is used up ([ADR 0009](0009-storage-contract.md)). If that happens during startup
+recovery, the daemon starts degraded instead of failing.
 
-Beyond the gate, SQLite's `max_page_count` stops the main database file at `database_max_mb`,
-and the cache writer stops writing (marking output `truncated`) when the shared cache budget is
-used up.
+The pre-write check uses the last measurement. Every transaction is additionally capped by
+SQLite's `max_page_count`, so a write that would not fit fails with `STORAGE_HARD_LIMIT` and is
+rolled back instead of exceeding the budget, even below `HARD_LIMIT`. The cache writer stops
+writing (marking output `truncated`) when the shared cache budget is used up.
 
 ### Cleanup
 
@@ -90,7 +96,7 @@ Triggers: daemon start, after any write or agent run when storage is above `NORM
 2. Delete expired cache entries, then the oldest entries until the cache is below
    `pressure_percent` (output of running agents is never deleted).
 3. Delete migration backups older than `retention_days`.
-4. `wal_checkpoint(TRUNCATE)` and `incremental_vacuum`.
+4. `incremental_vacuum`, which returns the freed pages to the filesystem.
 5. Re-measure.
 
 Expiry is enforced when cleanup runs, not by a timer. The cache only grows through agent runs,
@@ -106,7 +112,14 @@ branches or worktrees), if ever added, will be a separate, explicit feature.
 
 ## Consequences
 
-- Durable data alone can reach `HARD_LIMIT`; then the user must archive data (a future export
-  or delete feature) or raise `database_max_mb`.
+- **Durable data alone can reach `HARD_LIMIT`, and today the only remedy is raising
+  `database_max_mb`.** Cleanup never deletes durable data. Archiving a Plan or Work Item only
+  changes its status and frees almost no space; it is allowed at `HARD_LIMIT` so that work can be
+  wound down, not to reclaim storage. A future milestone adds explicit recovery paths:
+  export (durable data to a file the user owns), explicit delete of archived Plans and Work
+  Items, and database compaction (`VACUUM`) as a maintenance command.
+- Migrations need room for the database, a rollback journal, and a backup at the same time
+  ([ADR 0002](0002-sqlite.md)). If that does not fit, the daemon refuses to start with
+  `MIGRATION_STORAGE_REQUIRED` instead of exceeding the limit.
 - Orvia's own logs go to stderr; persisting and rotating them belongs to the process supervisor
   (launchd, systemd, a terminal).

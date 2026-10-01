@@ -5,6 +5,9 @@ import { filesystemPolicyFor } from '../../src/domain/sandbox.ts';
 import {
   assertOperationAllowed,
   assessStorage,
+  databaseCapacity,
+  JOURNAL_HEADER_BYTES,
+  JOURNAL_RECORD_OVERHEAD_BYTES,
   type StorageLimits,
   type StorageUsage,
 } from '../../src/domain/storage.ts';
@@ -88,50 +91,116 @@ describe('work item transitions', () => {
   });
 });
 
+describe('database capacity', () => {
+  const MIB = 1024 * 1024;
+  const pageSize = 4096;
+
+  test('main file at maxPages plus a full journal of those pages fits the budget', () => {
+    for (const fixedBytes of [0, 10 * MIB, 60 * MIB]) {
+      const capacity = databaseCapacity({
+        budgetBytes: 128 * MIB,
+        fixedBytes,
+        pageSize,
+        btreeCount: 16,
+      });
+      const worstCase =
+        capacity.maxPages * pageSize +
+        capacity.maxPages * (pageSize + JOURNAL_RECORD_OVERHEAD_BYTES) +
+        JOURNAL_HEADER_BYTES +
+        fixedBytes;
+      assert.ok(worstCase <= 128 * MIB, `fixed ${fixedBytes}`);
+      const onePageMore = worstCase + 2 * pageSize + JOURNAL_RECORD_OVERHEAD_BYTES;
+      assert.ok(onePageMore > 128 * MIB, 'the cap is as large as the budget allows');
+    }
+  });
+
+  test('backups and other files shrink the capacity; a full budget leaves none', () => {
+    const base = databaseCapacity({
+      budgetBytes: 128 * MIB,
+      fixedBytes: 0,
+      pageSize,
+      btreeCount: 16,
+    });
+    const withBackup = databaseCapacity({
+      budgetBytes: 128 * MIB,
+      fixedBytes: 50 * MIB,
+      pageSize,
+      btreeCount: 16,
+    });
+    assert.ok(withBackup.maxPages < base.maxPages);
+    assert.deepEqual(
+      databaseCapacity({ budgetBytes: MIB, fixedBytes: 2 * MIB, pageSize, btreeCount: 16 }),
+      { maxPages: 0, writeMaxPages: 0 },
+    );
+  });
+
+  test('ordinary writes stop below the cap, leaving a reserve for control transactions', () => {
+    const capacity = databaseCapacity({
+      budgetBytes: 128 * MIB,
+      fixedBytes: 0,
+      pageSize,
+      btreeCount: 16,
+    });
+    const depth = Math.ceil(Math.log2(capacity.maxPages));
+    assert.equal(capacity.maxPages - capacity.writeMaxPages, 16 * (depth + 1) + 1);
+  });
+});
+
 describe('storage pressure', () => {
   const MIB = 1024 * 1024;
   const limits: StorageLimits = {
     databaseMaxBytes: 100 * MIB,
     cacheMaxBytes: 100 * MIB,
-    databaseReserveBytes: 4 * MIB,
     pressurePercent: 70,
     warningPercent: 90,
     retentionDays: 7,
     maxCompletedRunsPerWorkItem: 5,
   };
-  const usage = (databaseMib: number, cacheMib = 0): StorageUsage => ({
-    database: { mainBytes: databaseMib * MIB, walBytes: 0, shmBytes: 0, backupBytes: 0 },
+  const pageSize = 4096;
+  const capacity = { maxPages: 12_000, writeMaxPages: 10_000 };
+  const shape = (pages: number) => ({ pageSize, pageCount: pages, btreeCount: 16 });
+  const usage = (cacheMib = 0, backupMib = 0): StorageUsage => ({
+    database: {
+      mainBytes: 0,
+      walBytes: 0,
+      shmBytes: 0,
+      journalBytes: 0,
+      backupBytes: backupMib * MIB,
+    },
     cacheBytes: cacheMib * MIB,
   });
+  const level = (pages: number) =>
+    assessStorage(usage(), limits, shape(pages), capacity).database.level;
 
-  test('levels follow the configured thresholds and the reserve', () => {
-    assert.equal(assessStorage(usage(69), limits).level, 'NORMAL');
-    assert.equal(assessStorage(usage(70), limits).level, 'PRESSURE');
-    assert.equal(assessStorage(usage(90), limits).level, 'WARNING');
-    assert.equal(assessStorage(usage(96), limits).level, 'HARD_LIMIT');
-    assert.equal(assessStorage(usage(95.9), limits).level, 'WARNING');
-    assert.equal(assessStorage(usage(0, 100), limits).cache.level, 'HARD_LIMIT');
+  test('database levels follow the data size against the write capacity', () => {
+    assert.equal(level(6_999), 'NORMAL');
+    assert.equal(level(7_000), 'PRESSURE');
+    assert.equal(level(9_000), 'WARNING');
+    assert.equal(level(10_000), 'HARD_LIMIT');
+    assert.equal(assessStorage(usage(100), limits, shape(1), capacity).cache.level, 'HARD_LIMIT');
   });
 
-  test('WAL, SHM, and backups count toward the database budget', () => {
+  test('every budgeted file counts toward database usage', () => {
     const assessment = assessStorage(
       {
         database: {
           mainBytes: 40 * MIB,
-          walBytes: 20 * MIB,
+          walBytes: 1 * MIB,
           shmBytes: 1 * MIB,
+          journalBytes: 2 * MIB,
           backupBytes: 40 * MIB,
         },
         cacheBytes: 0,
       },
       limits,
+      shape(1),
+      capacity,
     );
-    assert.equal(assessment.database.usedBytes, 101 * MIB);
-    assert.equal(assessment.database.level, 'HARD_LIMIT');
+    assert.equal(assessment.database.usedBytes, 84 * MIB);
   });
 
   test('at HARD_LIMIT only writes and agent runs are refused', () => {
-    const databaseFull = assessStorage(usage(99), limits);
+    const databaseFull = assessStorage(usage(), limits, shape(10_000), capacity);
     for (const allowed of ['read', 'control', 'maintenance'] as const) {
       assertOperationAllowed(databaseFull, allowed);
     }
@@ -152,7 +221,7 @@ describe('storage pressure', () => {
       },
     );
 
-    const cacheFull = assessStorage(usage(1, 100), limits);
+    const cacheFull = assessStorage(usage(100), limits, shape(1), capacity);
     assertOperationAllowed(cacheFull, 'write');
     assert.throws(
       () => {

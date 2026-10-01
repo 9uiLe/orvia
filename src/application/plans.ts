@@ -75,5 +75,5 @@ export function archivePlan(deps: Dependencies, input: { planId: PlanId }): Plan
       );
     }
     return deps.store.plans.update(plan.id, { status: 'archived' }, nowIso(deps));
-  });
+  }, 'reserve');
 }

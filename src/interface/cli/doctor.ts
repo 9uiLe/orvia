@@ -86,6 +86,17 @@ export async function runDoctor(paths: OrviaPaths, client: IpcClient): Promise<C
       status: schema.databaseVersion === schema.supportedVersion ? 'ok' : 'warn',
       detail: `v${schema.databaseVersion} (this build supports v${schema.supportedVersion})`,
     });
+    const status = (await client.call('get_status', {})) as {
+      recovery: { state: string; remainingRuns?: number; remediation?: string };
+    };
+    checks.push({
+      name: 'recovery',
+      status: status.recovery.state === 'complete' ? 'ok' : 'warn',
+      detail:
+        status.recovery.state === 'complete'
+          ? 'complete'
+          : `incomplete: ${String(status.recovery.remainingRuns)} run(s) still marked running. ${status.recovery.remediation ?? ''}`,
+    });
     const storage = (await client.call('get_storage_status', {})) as {
       assessment: { level: string };
     };

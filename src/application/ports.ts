@@ -2,7 +2,7 @@ import type { DecisionId, PlanId, RunId, WorkItemId } from '../domain/ids.ts';
 import type { Plan, PlanStatus } from '../domain/plan.ts';
 import type { AgentRun, Decision, Note, NoteKind, RunStatus } from '../domain/records.ts';
 import type { FilesystemPolicy } from '../domain/sandbox.ts';
-import type { DatabaseUsage } from '../domain/storage.ts';
+import type { DatabaseCapacity, DatabaseShape, DatabaseUsage } from '../domain/storage.ts';
 import type { WorkItem, WorkItemStatus } from '../domain/work-item.ts';
 import type { ObservedWorkspace, WorkspaceIdentity } from '../domain/workspace.ts';
 
@@ -12,8 +12,14 @@ import type { ObservedWorkspace, WorkspaceIdentity } from '../domain/workspace.t
  */
 export type SyncResult<T> = T extends PromiseLike<unknown> ? never : T;
 
+/**
+ * `write`: ordinary durable writes. `reserve`: control and maintenance (pause, recording a
+ * run's result, cleanup, archive), which may also use the reserve kept for them.
+ */
+export type TransactionMode = 'write' | 'reserve';
+
 export interface Store {
-  transaction<T>(fn: () => SyncResult<T>): T;
+  transaction<T>(fn: () => SyncResult<T>, mode?: TransactionMode): T;
   readonly plans: PlanRepository;
   readonly workItems: WorkItemRepository;
   readonly runs: RunRepository;
@@ -81,9 +87,11 @@ export interface RunRepository {
   current(workItemId: WorkItemId): AgentRun | null;
   listForWorkItem(workItemId: WorkItemId): AgentRun[];
   listRunning(): AgentRun[];
-  markAllRunningInterrupted(now: string): RunId[];
-  /** Deletes finished runs beyond `keep` per Work Item and returns their output refs. */
-  pruneFinished(keep: number): { runIds: RunId[]; outputRefs: string[] };
+  /** Returns false if the run was no longer running. */
+  markInterrupted(id: RunId, now: string): boolean;
+  /** Finished runs beyond the newest `keep` per Work Item. */
+  listFinishedBeyond(keep: number): { runId: RunId; outputRef: string | null }[];
+  delete(id: RunId): void;
   listOutputRefs(): string[];
 }
 
@@ -112,12 +120,6 @@ export interface NoteRepository {
   listForPlan(planId: PlanId): Note[];
 }
 
-export interface CheckpointResult {
-  readonly busy: boolean;
-  readonly walPages: number;
-  readonly checkpointedPages: number;
-}
-
 export interface SchemaStatus {
   readonly databaseVersion: number;
   readonly supportedVersion: number;
@@ -130,7 +132,8 @@ export interface SchemaStatus {
 }
 
 export interface DatabaseMaintenance {
-  checkpoint(): CheckpointResult;
+  shape(): DatabaseShape;
+  capacity(): DatabaseCapacity;
   incrementalVacuum(): { freedPages: number };
   schemaStatus(): SchemaStatus;
 }
@@ -199,11 +202,21 @@ export interface ProcessExit {
   readonly exitCode: number | null;
   readonly signal: string | null;
   readonly spawnError: string | null;
+  /** Set when processes the agent left behind could not be confirmed stopped. */
+  readonly leftoverError: string | null;
 }
 
+/**
+ * An agent and every process it started. `exited` resolves once the agent has exited and its
+ * remaining descendants have been stopped.
+ */
 export interface RunningProcess {
   readonly exited: Promise<ProcessExit>;
-  cancel(): void;
+  /**
+   * Stops the whole process tree and resolves only after it is confirmed gone.
+   * Rejects with AGENT_TERMINATION_FAILED otherwise.
+   */
+  terminate(): Promise<void>;
 }
 
 export interface ProcessLauncher {

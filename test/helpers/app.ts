@@ -1,7 +1,13 @@
 import { fileURLToPath } from 'node:url';
 import type { Application } from '../../src/application/application.ts';
 import { invokeOperation } from '../../src/application/operations.ts';
-import type { AgentAdapter, AgentInvocation, Clock } from '../../src/application/ports.ts';
+import type {
+  AgentAdapter,
+  AgentInvocation,
+  Clock,
+  Logger,
+  ProcessLauncher,
+} from '../../src/application/ports.ts';
 import { OrviaError } from '../../src/domain/errors.ts';
 import type { OrviaConfig } from '../../src/infrastructure/config.ts';
 import type { Migration } from '../../src/infrastructure/sqlite/migrator.ts';
@@ -35,17 +41,20 @@ export interface TestDaemonOptions {
   readonly clock?: Clock;
   readonly agent?: FakeAgent;
   readonly listen?: boolean;
+  readonly launcher?: ProcessLauncher;
+  readonly logger?: Logger;
 }
 
 export function startTestDaemon(env: TestEnv, options: TestDaemonOptions = {}): Promise<Daemon> {
   return startDaemon({
     paths: env.paths,
     config: options.config ?? defaultConfig(),
-    logger: silentLogger,
+    logger: options.logger ?? silentLogger,
     agents: [options.agent ?? new FakeAgent()],
     listen: options.listen ?? false,
     ...(options.migrations === undefined ? {} : { migrations: options.migrations }),
     ...(options.clock === undefined ? {} : { clock: options.clock }),
+    ...(options.launcher === undefined ? {} : { launcher: options.launcher }),
   });
 }
 

@@ -4,13 +4,19 @@ import type { AgentAdapter, Clock, Logger, ProcessLauncher } from '../../applica
 import { claudeAdapter, codexAdapter } from '../../infrastructure/agents/adapters.ts';
 import { NodeProcessLauncher } from '../../infrastructure/agents/process-launcher.ts';
 import { FileCache } from '../../infrastructure/cache/file-cache.ts';
-import { loadConfig, storageLimits, type OrviaConfig } from '../../infrastructure/config.ts';
+import {
+  databaseBudgetBytes,
+  loadConfig,
+  storageLimits,
+  type OrviaConfig,
+} from '../../infrastructure/config.ts';
 import { GitCli } from '../../infrastructure/git/git-cli.ts';
 import { GitWorkspaceInspector } from '../../infrastructure/git/workspace-inspector.ts';
 import { createLogger } from '../../infrastructure/logger.ts';
 import { ensureDir, ensurePrivateDir, type OrviaPaths } from '../../infrastructure/paths.ts';
 import { SqliteDatabaseFiles } from '../../infrastructure/sqlite/database-files.ts';
-import { openDatabase, setDatabaseHardCap } from '../../infrastructure/sqlite/database.ts';
+import { measureDatabaseFiles } from '../../infrastructure/sqlite/database-files.ts';
+import { openDatabase } from '../../infrastructure/sqlite/database.ts';
 import type { Migration, MigrationReport } from '../../infrastructure/sqlite/migrator.ts';
 import { MIGRATIONS } from '../../infrastructure/sqlite/migrations/index.ts';
 import { SqliteStore } from '../../infrastructure/sqlite/sqlite-store.ts';
@@ -54,12 +60,18 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     backupDir: paths.backupDir,
     migrations: options.migrations ?? MIGRATIONS,
     now: () => clock.now(),
+    databaseMaxBytes: databaseBudgetBytes(config),
   });
-  const store = new SqliteStore(opened.db, options.migrations ?? MIGRATIONS);
+  const store = new SqliteStore(opened.db, options.migrations ?? MIGRATIONS, {
+    budgetBytes: databaseBudgetBytes(config),
+    fixedBytes: () => {
+      const usage = measureDatabaseFiles(paths.databaseFile, paths.backupDir);
+      return usage.walBytes + usage.shmBytes + usage.journalBytes + usage.backupBytes;
+    },
+  });
   let server: Server | null = null;
   try {
-    const limits = storageLimits(config, opened.walCheckpointBytes);
-    setDatabaseHardCap(opened, limits.databaseMaxBytes);
+    const limits = storageLimits(config);
     const agents = options.agents ?? [
       codexAdapter(config.agents.codex?.command),
       claudeAdapter(config.agents.claude?.command),
@@ -70,7 +82,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       cache: new FileCache(paths.cacheDir, limits.cacheMaxBytes),
       git: new GitWorkspaceInspector(new GitCli()),
       agents: new Map(agents.map((adapter) => [adapter.name, adapter])),
-      launcher: options.launcher ?? new NodeProcessLauncher(),
+      launcher:
+        options.launcher ??
+        new NodeProcessLauncher({
+          graceMs: config.agents.termination_grace_ms,
+          killConfirmationMs: config.agents.kill_confirmation_ms,
+        }),
       clock,
       logger,
       limits,
@@ -81,10 +98,17 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         to: opened.migration.toVersion,
       });
     }
-    const interrupted = app.runs.recover();
-    if (interrupted.length > 0) {
+    const recovery = app.runs.recover();
+    if (recovery.recoveredRunIds.length > 0) {
       logger.warn('runs from a previous daemon were marked interrupted', {
-        count: interrupted.length,
+        count: recovery.recoveredRunIds.length,
+      });
+    }
+    if (recovery.state === 'incomplete') {
+      // Degraded start: inspection, controls, and cleanup stay available; writes are refused
+      // until a restart completes recovery (ADR 0009).
+      logger.error('startup recovery incomplete: database storage reserve exhausted', {
+        remaining: recovery.remainingRunIds.length,
       });
     }
     await app.storage.cleanupIfNeeded();
@@ -97,7 +121,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       store,
       migration: opened.migration,
       close: async () => {
-        app.runs.shutdown();
+        // Stop accepting requests, stop every agent process tree and record the runs, and
+        // only then close the database.
         if (listening !== null) {
           await new Promise<void>((resolve) => {
             listening.close(() => {
@@ -106,6 +131,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
             listening.closeAllConnections();
           });
         }
+        await app.runs.shutdown();
         store.close();
         logger.info('orvia daemon stopped');
       },

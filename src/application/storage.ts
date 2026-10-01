@@ -6,7 +6,7 @@ import {
   type StorageUsage,
 } from '../domain/storage.ts';
 import type { Dependencies } from './dependencies.ts';
-import type { CheckpointResult, CleanupFailure } from './ports.ts';
+import type { CleanupFailure } from './ports.ts';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -23,7 +23,6 @@ export interface CleanupReport {
   readonly cacheEntriesRemoved: number;
   readonly cacheBytesFreed: number;
   readonly backupsRemoved: string[];
-  readonly checkpoint: CheckpointResult | null;
   readonly vacuumedPages: number;
   readonly failures: CleanupFailure[];
 }
@@ -45,9 +44,15 @@ export class StorageService {
       database: await this.#deps.databaseFiles.measure(),
       cacheBytes: await this.#deps.cache.measureBytes(),
     };
+    const { maintenance } = this.#deps.store;
     return {
       usage,
-      assessment: assessStorage(usage, this.#deps.limits),
+      assessment: assessStorage(
+        usage,
+        this.#deps.limits,
+        maintenance.shape(),
+        maintenance.capacity(),
+      ),
       limits: this.#deps.limits,
     };
   }
@@ -84,11 +89,28 @@ export class StorageService {
       }
     };
 
-    const pruned = attempt(
+    // One run per transaction, like every other reserve transaction (ADR 0009).
+    const pruned = { runIds: [] as string[], outputRefs: [] as string[] };
+    const candidates = attempt(
       'database:runs',
-      () => store.transaction(() => store.runs.pruneFinished(limits.maxCompletedRunsPerWorkItem)),
-      { runIds: [], outputRefs: [] },
+      () => store.runs.listFinishedBeyond(limits.maxCompletedRunsPerWorkItem),
+      [],
     );
+    for (const candidate of candidates) {
+      const deleted = attempt(
+        `database:run:${candidate.runId}`,
+        () => {
+          store.transaction(() => {
+            store.runs.delete(candidate.runId);
+          }, 'reserve');
+          return true;
+        },
+        false,
+      );
+      if (!deleted) break;
+      pruned.runIds.push(candidate.runId);
+      if (candidate.outputRef !== null) pruned.outputRefs.push(candidate.outputRef);
+    }
     failures.push(...(await cache.remove(pruned.outputRefs)));
 
     const expiresBefore = new Date(clock.now().getTime() - limits.retentionDays * DAY_MS);
@@ -111,7 +133,6 @@ export class StorageService {
     const backups = await databaseFiles.pruneBackups(expiresBefore);
     failures.push(...backups.failures);
 
-    const checkpoint = attempt('database:checkpoint', () => store.maintenance.checkpoint(), null);
     const vacuum = attempt('database:vacuum', () => store.maintenance.incrementalVacuum(), {
       freedPages: 0,
     });
@@ -132,7 +153,6 @@ export class StorageService {
       cacheEntriesRemoved: sweep.removed,
       cacheBytesFreed: sweep.freedBytes,
       backupsRemoved: backups.removed,
-      checkpoint,
       vacuumedPages: vacuum.freedPages,
       failures,
     };

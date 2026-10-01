@@ -3,7 +3,11 @@ import { after, before, describe, test } from 'node:test';
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import { openDatabase } from '../../src/infrastructure/sqlite/database.ts';
 import { MIGRATIONS } from '../../src/infrastructure/sqlite/migrations/index.ts';
-import { READ_QUERIES, type ReadQueryName } from '../../src/infrastructure/sqlite/queries.ts';
+import {
+  READ_QUERIES,
+  WRITE_STATEMENTS,
+  type ReadQueryName,
+} from '../../src/infrastructure/sqlite/queries.ts';
 import { makeTestEnv, type TestEnv } from '../helpers/env.ts';
 import { mkdirSync } from 'node:fs';
 
@@ -42,6 +46,7 @@ describe('query plans', () => {
       backupDir: env.paths.backupDir,
       migrations: MIGRATIONS,
       now: () => new Date(),
+      databaseMaxBytes: 128 * 1024 * 1024,
     }).db;
     db.exec('ANALYZE');
   });
@@ -65,4 +70,31 @@ describe('query plans', () => {
       assert.deepEqual(fullScans, [], `${name}:\n${plan.join('\n')}`);
     });
   }
+
+  // Sorting a Work Item list, the running runs, or a Work Item's runs uses a temporary b-tree. Its size is bounded
+  // by those rows, and temp_store = MEMORY keeps it off disk. Adding indexes to avoid these
+  // sorts was not worth a migration; a new query that sorts should be a conscious choice.
+  test('only the known, bounded sorts use temporary b-trees', () => {
+    const queries: [string, string, SQLInputValue[]][] = [
+      ...(Object.keys(READ_QUERIES) as ReadQueryName[]).map(
+        (name): [string, string, SQLInputValue[]] => [name, READ_QUERIES[name], PARAMS[name]],
+      ),
+      ['finishedRunsBeyondKeep', WRITE_STATEMENTS.finishedRunsBeyondKeep, [5]],
+    ];
+    const sorting = queries
+      .filter(([, sql, params]) =>
+        db
+          .prepare(`EXPLAIN QUERY PLAN ${sql}`)
+          .all(...params)
+          .some((row) => String(row['detail']).includes('TEMP B-TREE')),
+      )
+      .map(([name]) => name);
+    assert.deepEqual(sorting, [
+      'listWorkItemsForPlan',
+      'listWorkItemsForPlanByStatus',
+      'listWorkItemsByStatus',
+      'listRunningRuns',
+      'finishedRunsBeyondKeep',
+    ]);
+  });
 });

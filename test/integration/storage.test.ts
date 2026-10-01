@@ -77,11 +77,15 @@ describe('bounded storage', () => {
     return run;
   }
 
-  test('maintenance reserve is one WAL checkpoint interval below the database limit', async () => {
+  test('data capacity leaves room for the rollback journal and a control reserve', async () => {
     const d = await start();
-    const { limits, assessment } = await storage(d);
-    assert.equal(limits.databaseReserveBytes, 1000 * 4096);
-    assert.equal(assessment.database.hardLimitBytes, 128 * MIB - 1000 * 4096);
+    const { assessment } = await storage(d);
+    const { writeCapacityBytes, maxCapacityBytes, limitBytes } = assessment.database;
+    assert.equal(limitBytes, 128 * MIB);
+    assert.ok(writeCapacityBytes < maxCapacityBytes, 'control and maintenance have a reserve');
+    // Main file at maxCapacity plus a journal of the same pages must still fit the budget.
+    assert.ok(maxCapacityBytes * 2 < limitBytes);
+    assert.ok(maxCapacityBytes * 2 > limitBytes * 0.99, 'no capacity is wasted beyond that');
   });
 
   test('quota approaching: levels rise through PRESSURE and WARNING to HARD_LIMIT', async () => {
@@ -109,21 +113,25 @@ describe('bounded storage', () => {
   test('hard quota: new work is refused while status, controls, and maintenance still work', async () => {
     const d = await start({ database_max_mb: 5 });
     const { item } = await boundWorkItem(d);
-    const body = 'x'.repeat(64 * KIB);
-    // Fill durable data until even a cleanup (which checkpoints the WAL) cannot relieve it.
-    let full = false;
-    for (let i = 0; i < 400 && !full; i++) {
-      try {
-        await call(d.app, 'add_context', { planId: 'P-1', body });
-      } catch (error) {
-        assert.equal((error as { code: string }).code, 'STORAGE_HARD_LIMIT');
-        const report = await call<CleanupReport>(d.app, 'run_storage_cleanup');
-        full = report.after.database.level === 'HARD_LIMIT';
+    // Fill durable data with ever smaller notes until the data reaches the write capacity.
+    // Each refusal comes from the pre-write gate or from SQLite's page cap; neither writes.
+    for (const size of [64 * KIB, 4 * KIB, 100]) {
+      for (let i = 0; i < 2000; i++) {
+        try {
+          await call(d.app, 'add_context', { planId: 'P-1', body: 'x'.repeat(size) });
+        } catch (error) {
+          assert.equal((error as { code: string }).code, 'STORAGE_HARD_LIMIT');
+          break;
+        }
       }
     }
-    assert.ok(full, 'durable data alone reaches the hard limit');
-
-    await rejectsWith(call(d.app, 'create_plan', { title: 'more' }), 'STORAGE_HARD_LIMIT');
+    const full = await storage(d);
+    assert.equal(full.assessment.database.level, 'HARD_LIMIT');
+    assert.ok(full.assessment.database.usedBytes <= 5 * MIB);
+    await rejectsWith(
+      call(d.app, 'add_context', { planId: 'P-1', body: 'x' }),
+      'STORAGE_HARD_LIMIT',
+    );
     await rejectsWith(
       call(d.app, 'start_run', { workItemId: item.id, agent: 'fake', instructions: 'go' }),
       'STORAGE_HARD_LIMIT',
@@ -254,17 +262,16 @@ describe('bounded storage', () => {
     assert.ok(finished.outputBytes <= MIB);
   });
 
-  test('WAL growth is measured and checkpointed back to zero', async () => {
+  test('no rollback journal is left between transactions', async () => {
     const d = await start();
     await call(d.app, 'create_plan', { title: 'P' });
-    for (let i = 0; i < 300; i++) {
+    for (let i = 0; i < 50; i++) {
       await call(d.app, 'add_context', { planId: 'P-1', body: 'y'.repeat(4 * KIB) });
     }
-    const before = await storage(d);
-    assert.ok(before.usage.database.walBytes > 0, 'WAL size is part of the measured usage');
-    const report = await call<CleanupReport>(d.app, 'run_storage_cleanup');
-    assert.equal(report.checkpoint?.busy, false);
-    assert.equal((await storage(d)).usage.database.walBytes, 0);
+    const usage = (await storage(d)).usage.database;
+    assert.equal(usage.journalBytes, 0);
+    assert.equal(usage.walBytes, 0);
+    assert.equal(usage.shmBytes, 0);
   });
 
   test('cleanup failure is reported and does not stop the remaining steps', async (t) => {
@@ -279,7 +286,7 @@ describe('bounded storage', () => {
     try {
       const report = await call<CleanupReport>(d.app, 'run_storage_cleanup');
       assert.ok(report.failures.some((failure) => failure.target === 'cache:runs/stuck.log'));
-      assert.notEqual(report.checkpoint, null, 'database maintenance still ran');
+      assert.equal(typeof report.vacuumedPages, 'number', 'database maintenance still ran');
       assert.equal(exists(stuck), true);
     } finally {
       chmodSync(runsDir, 0o700);

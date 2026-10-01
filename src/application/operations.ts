@@ -7,6 +7,7 @@ import { WORK_ITEM_STATUSES } from '../domain/work-item.ts';
 import type { Application } from './application.ts';
 import { archivePlan, createPlan, getPlan, listPlans, updatePlan } from './plans.ts';
 import { addContext, recordDecision, submitFeedback } from './records.ts';
+import { recoveryIncompleteError } from './runs.ts';
 import { getStatus } from './status.ts';
 import {
   bindWorkspace,
@@ -14,6 +15,7 @@ import {
   discoverWorktrees,
   getWorkItem,
   listWorkItems,
+  pauseWorkItem,
   transition,
   updateWorkItem,
 } from './work-items.ts';
@@ -81,7 +83,7 @@ export const OPERATIONS: readonly Operation[] = [
       'Overview of open Work Items, running Agent Runs, and storage pressure. Start here to answer "what is happening now?".',
     operationClass: 'read',
     input: noInput,
-    handler: (app) => getStatus(app.deps, app.storage),
+    handler: (app) => getStatus(app.deps, app.storage, app.runs),
   }),
   defineOperation({
     name: 'create_plan',
@@ -226,10 +228,11 @@ export const OPERATIONS: readonly Operation[] = [
   defineOperation({
     name: 'pause_work_item',
     title: 'Pause work item',
-    description: 'Pause a Work Item. A running agent is cancelled and no new run can start.',
+    description:
+      'Pause a Work Item. Returns after its running agent and every process the agent started have stopped; if they cannot be stopped, fails with AGENT_TERMINATION_FAILED and the Work Item stays active.',
     operationClass: 'control',
     input: z.object({ workItemId: id('workItem', 'Work Item id') }),
-    handler: (app, input) => transition(app.deps, app.runs, input, 'pause'),
+    handler: (app, input) => pauseWorkItem(app.deps, app.runs, input),
   }),
   defineOperation({
     name: 'resume_work_item',
@@ -237,7 +240,7 @@ export const OPERATIONS: readonly Operation[] = [
     description: 'Resume a paused Work Item so that runs can start again.',
     operationClass: 'control',
     input: z.object({ workItemId: id('workItem', 'Work Item id') }),
-    handler: (app, input) => transition(app.deps, app.runs, input, 'resume'),
+    handler: (app, input) => transition(app.deps, input, 'resume'),
   }),
   defineOperation({
     name: 'complete_work_item',
@@ -245,7 +248,7 @@ export const OPERATIONS: readonly Operation[] = [
     description: 'Mark a Work Item as completed. Fails while an agent is running.',
     operationClass: 'write',
     input: z.object({ workItemId: id('workItem', 'Work Item id') }),
-    handler: (app, input) => transition(app.deps, app.runs, input, 'complete'),
+    handler: (app, input) => transition(app.deps, input, 'complete'),
   }),
   defineOperation({
     name: 'archive_work_item',
@@ -253,7 +256,7 @@ export const OPERATIONS: readonly Operation[] = [
     description: 'Archive a Work Item. Archived data is kept. Fails while an agent is running.',
     operationClass: 'maintenance',
     input: z.object({ workItemId: id('workItem', 'Work Item id') }),
-    handler: (app, input) => transition(app.deps, app.runs, input, 'archive'),
+    handler: (app, input) => transition(app.deps, input, 'archive'),
   }),
   defineOperation({
     name: 'add_context',
@@ -340,6 +343,11 @@ export async function invokeOperation(
 ): Promise<unknown> {
   const operation = findOperation(name);
   const gated = operation.operationClass === 'write' || operation.operationClass === 'agent_run';
+  // While startup recovery is incomplete the daemon only serves inspection, controls, and
+  // maintenance; new work would build on run records that still claim to be running.
+  if (gated && app.runs.recoveryStatus().state === 'incomplete') {
+    throw recoveryIncompleteError(app.runs.recoveryStatus(), operation.name);
+  }
   if (gated) assertOperationAllowed(await app.storage.assess(), operation.operationClass);
   const result = await operation.run(app, input);
   if (gated) app.scheduleCleanupIfNeeded();

@@ -27,6 +27,8 @@ describe('configuration', () => {
       warning_percent: 90,
     });
     assert.equal(config.log_level, 'info');
+    assert.equal(config.agents.termination_grace_ms, 10_000);
+    assert.equal(config.agents.kill_confirmation_ms, 5_000);
   });
 
   test('invalid values are rejected', () => {
@@ -44,11 +46,10 @@ describe('configuration', () => {
     }
   });
 
-  test('the database limit must leave room above the maintenance reserve', () => {
-    const config = validateConfig({ storage: { database_max_mb: 3 } }, 'test');
-    assert.throws(() => storageLimits(config, 4_096_000), { code: 'CONFIG_INVALID' });
-    const limits = storageLimits(validateConfig({}, 'test'), 4_096_000);
+  test('limits are the configured sizes in bytes', () => {
+    const limits = storageLimits(validateConfig({}, 'test'));
     assert.equal(limits.databaseMaxBytes, 128 * 1024 * 1024);
+    assert.equal(limits.cacheMaxBytes, 512 * 1024 * 1024);
   });
 });
 
