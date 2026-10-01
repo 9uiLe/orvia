@@ -1,0 +1,50 @@
+import type { Plan } from '../domain/plan.ts';
+import type { Decision, Note } from '../domain/records.ts';
+import type { WorkItem } from '../domain/work-item.ts';
+import type { WorkspaceIdentity } from '../domain/workspace.ts';
+
+export interface PromptInput {
+  readonly plan: Plan;
+  readonly workItem: WorkItem;
+  readonly workspace: WorkspaceIdentity;
+  readonly decisions: readonly Decision[];
+  readonly notes: readonly Note[];
+  readonly instructions: string;
+}
+
+/**
+ * The workspace is stated as a fact. The agent is never asked to find or choose a worktree.
+ */
+export function composeAgentPrompt(input: PromptInput): string {
+  const { plan, workItem, workspace } = input;
+  const relevantDecisions = input.decisions.filter(
+    (decision) =>
+      decision.status === 'accepted' &&
+      (decision.workItemId === null || decision.workItemId === workItem.id),
+  );
+  const relevantNotes = input.notes.filter(
+    (note) => note.workItemId === null || note.workItemId === workItem.id,
+  );
+
+  const sections = [
+    `You are working on Work Item ${workItem.id} "${workItem.title}" of Plan ${plan.id} "${plan.title}".`,
+    `Your working directory is ${workspace.worktreeRoot} on branch ${workspace.branch}. ` +
+      'Orvia selected this workspace for you. Do not switch branches and do not modify files outside it.',
+    `## Instructions\n\n${input.instructions}`,
+  ];
+  if (plan.description !== '') sections.push(`## Plan\n\n${plan.description}`);
+  if (workItem.description !== '') sections.push(`## Work Item\n\n${workItem.description}`);
+  if (relevantDecisions.length > 0) {
+    sections.push(
+      '## Accepted human decisions\n\n' +
+        relevantDecisions.map((d) => `- ${d.id} ${d.title}: ${d.body}`).join('\n'),
+    );
+  }
+  if (relevantNotes.length > 0) {
+    sections.push(
+      '## Human context and feedback (oldest first)\n\n' +
+        relevantNotes.map((n) => `- [${n.kind}] ${n.body}`).join('\n'),
+    );
+  }
+  return sections.join('\n\n') + '\n';
+}
