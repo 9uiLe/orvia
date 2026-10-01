@@ -55,6 +55,11 @@ Important design decisions are recorded as ADRs in `docs/adr/` using the file na
 
 ## Updating dependencies
 
+- Prefer the Node.js standard library and dependencies already in use. A new dependency needs
+  the review described in [ADR 0007](docs/adr/0007-external-dependencies.md). If it adds runtime
+  packages, run `npm run deps:check -- --write` and commit `docs/runtime-dependencies.txt`; CI
+  fails otherwise.
+
 - Nix inputs are updated deliberately with `nix flake update`, in a dedicated pull request.
 - JavaScript dependencies are updated by Dependabot (grouped, with a cooldown). Do not mix manual dependency bumps into feature pull requests.
 

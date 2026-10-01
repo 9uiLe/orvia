@@ -47,6 +47,8 @@ jobs:
         run: nix develop --command npm run typecheck
       - name: Lint
         run: nix develop --command npm run lint
+      - name: Runtime dependency inventory
+        run: nix develop --command npm run deps:check
       - name: Unit tests
         run: nix develop --command npm run test:unit
       - name: Integration tests (worktree identity, storage quotas, migrations, query plans, daemon, CLI, MCP)
