@@ -37,14 +37,23 @@ export class RunSupervisor implements RunControl {
     this.#storage = storage;
   }
 
-  /** Marks runs left `running` by a previous daemon process as interrupted. */
+  /**
+   * Marks runs left `running` by a previous daemon process as interrupted, one run per
+   * transaction: control transactions must stay one-row changes to fit the storage reserve
+   * (ADR 0009), and recovery needs no atomicity across runs. If it stops halfway, the next
+   * start finishes the rest.
+   */
   recover(): RunId[] {
     const { store } = this.#deps;
-    if (store.runs.listRunning().length === 0) return [];
-    return store.transaction(
-      () => store.runs.markAllRunningInterrupted(nowIso(this.#deps)),
-      'reserve',
-    );
+    const recovered: RunId[] = [];
+    for (const run of store.runs.listRunning()) {
+      const changed = store.transaction(
+        () => store.runs.markInterrupted(run.id, nowIso(this.#deps)),
+        'reserve',
+      );
+      if (changed) recovered.push(run.id);
+    }
+    return recovered;
   }
 
   async start(input: {

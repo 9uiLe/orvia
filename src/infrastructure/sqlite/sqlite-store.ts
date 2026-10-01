@@ -30,7 +30,13 @@ import {
 import type { AgentRun, Decision, Note, NoteKind, RunStatus } from '../../domain/records.ts';
 import { WORK_ITEM_STATUSES, type WorkItem, type WorkItemStatus } from '../../domain/work-item.ts';
 import { isUniqueViolation, translateSqliteError } from './database.ts';
-import { latestVersion, readHeader, readHistory, type Migration } from './migrator.ts';
+import {
+  countSchemaBtrees,
+  latestVersion,
+  readHeader,
+  readHistory,
+  type Migration,
+} from './migrator.ts';
 import { READ_QUERIES, WRITE_STATEMENTS } from './queries.ts';
 
 type Row = Record<string, unknown>;
@@ -320,18 +326,14 @@ export class SqliteStore implements Store {
       listForWorkItem: (workItemId) =>
         all(q.listRunsForWorkItem, parseId('workItem', workItemId)).map((row) => rowToRun(row)),
       listRunning: () => all(q.listRunningRuns).map((row) => rowToRun(row)),
-      markAllRunningInterrupted: (now) =>
-        all(w.interruptRunningRuns, now).map((row) => formatId('run', num(row, 'id'))),
-      pruneFinished: (keep) => {
-        const rows = all(w.finishedRunsBeyondKeep, keep);
-        for (const row of rows) run(w.deleteRun, num(row, 'id'));
-        return {
-          runIds: rows.map((row) => formatId('run', num(row, 'id'))),
-          outputRefs: rows.flatMap((row) => {
-            const ref = strOrNull(row, 'output_ref');
-            return ref === null ? [] : [ref];
-          }),
-        };
+      markInterrupted: (id, now) => run(w.interruptRun, now, parseId('run', id)).changes === 1,
+      listFinishedBeyond: (keep) =>
+        all(w.finishedRunsBeyondKeep, keep).map((row) => ({
+          runId: formatId('run', num(row, 'id')),
+          outputRef: strOrNull(row, 'output_ref'),
+        })),
+      delete: (id) => {
+        run(w.deleteRun, parseId('run', id));
       },
       listOutputRefs: () => all(w.listOutputRefs).map((row) => str(row, 'output_ref')),
     };
@@ -426,10 +428,8 @@ export class SqliteStore implements Store {
   }
 
   #shape(): DatabaseShape {
-    this.#btreeCount ??= num(
-      this.#prepare('SELECT count(*) AS n FROM sqlite_schema WHERE rootpage > 0').get() ?? {},
-      'n',
-    );
+    // The schema only changes through migrations, which finish before the store is created.
+    this.#btreeCount ??= countSchemaBtrees(this.#db);
     return {
       pageSize: num(this.#prepare('PRAGMA page_size').get() ?? {}, 'page_size'),
       pageCount: num(this.#prepare('PRAGMA page_count').get() ?? {}, 'page_count'),

@@ -89,15 +89,28 @@ export class StorageService {
       }
     };
 
-    const pruned = attempt(
+    // One run per transaction, like every other reserve transaction (ADR 0009).
+    const pruned = { runIds: [] as string[], outputRefs: [] as string[] };
+    const candidates = attempt(
       'database:runs',
-      () =>
-        store.transaction(
-          () => store.runs.pruneFinished(limits.maxCompletedRunsPerWorkItem),
-          'reserve',
-        ),
-      { runIds: [], outputRefs: [] },
+      () => store.runs.listFinishedBeyond(limits.maxCompletedRunsPerWorkItem),
+      [],
     );
+    for (const candidate of candidates) {
+      const deleted = attempt(
+        `database:run:${candidate.runId}`,
+        () => {
+          store.transaction(() => {
+            store.runs.delete(candidate.runId);
+          }, 'reserve');
+          return true;
+        },
+        false,
+      );
+      if (!deleted) break;
+      pruned.runIds.push(candidate.runId);
+      if (candidate.outputRef !== null) pruned.outputRefs.push(candidate.outputRef);
+    }
     failures.push(...(await cache.remove(pruned.outputRefs)));
 
     const expiresBefore = new Date(clock.now().getTime() - limits.retentionDays * DAY_MS);

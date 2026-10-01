@@ -8,7 +8,12 @@ import { OrviaError } from '../../src/domain/errors.ts';
 import { databaseUsedBytes } from '../../src/domain/storage.ts';
 import { measureDatabaseFiles } from '../../src/infrastructure/sqlite/database-files.ts';
 import { openDatabase } from '../../src/infrastructure/sqlite/database.ts';
-import { ORVIA_APPLICATION_ID, type Migration } from '../../src/infrastructure/sqlite/migrator.ts';
+import {
+  countSchemaBtrees,
+  ORVIA_APPLICATION_ID,
+  planMigrationStorage,
+  type Migration,
+} from '../../src/infrastructure/sqlite/migrator.ts';
 import { MIGRATIONS } from '../../src/infrastructure/sqlite/migrations/index.ts';
 import { call, rejectsWith, startTestDaemon } from '../helpers/app.ts';
 import { ManualClock, makeTestEnv, type TestEnv } from '../helpers/env.ts';
@@ -365,6 +370,100 @@ describe('database migrations', () => {
       const usage = measureDatabaseFiles(env.paths.databaseFile, env.paths.backupDir);
       assert.equal(usage.backupBytes, statSync(backupPath).size);
       assert.ok(databaseUsedBytes(usage) <= 16 * MIB);
+    });
+
+    describe('control reserve after the schema grows', () => {
+      const tables = (from: number, count: number) =>
+        Array.from(
+          { length: count },
+          (_, k) =>
+            `CREATE TABLE extra_${from + k} (id INTEGER PRIMARY KEY, v TEXT) STRICT;
+             CREATE INDEX extra_${from + k}_v ON extra_${from + k} (v);`,
+        ).join('\n');
+
+      /** The smallest budget the storage preflight accepts for migrating `seed` data. */
+      function tightBudget(): number {
+        const db = new DatabaseSync(env.paths.databaseFile);
+        try {
+          const read = (name: string) => Number(pragma(db, name));
+          let budget = 4 * MIB;
+          for (let i = 0; i < 5; i++) {
+            budget = planMigrationStorage({
+              usage: measureDatabaseFiles(env.paths.databaseFile, env.paths.backupDir),
+              pageSize: read('page_size'),
+              pageCount: read('page_count'),
+              freelistCount: read('freelist_count'),
+              btreeCount: countSchemaBtrees(db),
+              headroomBytes: 0,
+              needsBackup: true,
+              budgetBytes: budget,
+            }).estimatedRequiredTotalBytes;
+          }
+          return budget;
+        } finally {
+          db.close();
+        }
+      }
+
+      function btrees(): number {
+        const db = new DatabaseSync(env.paths.databaseFile);
+        try {
+          return countSchemaBtrees(db);
+        } finally {
+          db.close();
+        }
+      }
+
+      test('new tables and indexes that still leave the reserve are committed', () => {
+        seed(MIB);
+        const before = btrees();
+        const grows: Migration = { version: 2, name: 'more_tables', sql: tables(0, 2) };
+        open([v1, grows], 16 * MIB).db.close();
+        assert.equal(userVersion(), 2);
+        assert.equal(btrees(), before + 4);
+      });
+
+      test('a migration whose new b-trees eat the reserve is rolled back before COMMIT', () => {
+        seed(MIB);
+        const before = btrees();
+        const budget = tightBudget();
+        // Few enough new pages to fit under the migration's page cap; enough new b-trees that
+        // the larger reserve no longer fits.
+        const grows: Migration = { version: 2, name: 'many_tables', sql: tables(0, 3) };
+
+        const error = migrationError(() => open([v1, grows], budget));
+        assert.equal(error.code, 'MIGRATION_STORAGE_REQUIRED');
+        const detail = (key: string) => error.details[key];
+        assert.equal(detail('version'), 2);
+        assert.equal(detail('name'), 'many_tables');
+        assert.equal(detail('configuredLimitBytes'), budget);
+        assert.equal(detail('postMigrationBtreeCount'), before + 6);
+        assert.ok(Number(detail('postMigrationPageCount')) > Number(detail('writeMaxPages')));
+        assert.ok(Number(detail('maxPages')) > Number(detail('writeMaxPages')));
+        assert.ok(Number(detail('requiredAdditionalBytes')) > 0);
+
+        assert.equal(backups().length, 1, 'the preflight passed and the backup was written');
+        assert.equal(userVersion(), 1);
+        assert.equal(btrees(), before, 'no new table or index remains');
+        assert.ok(usedBytes() <= budget);
+      });
+
+      test('in a chain, migrations before the one that does not fit stay applied', () => {
+        seed(MIB);
+        const db = new DatabaseSync(env.paths.databaseFile);
+        const pageSize = Number(pragma(db, 'page_size'));
+        db.close();
+        // Room for one more small table's reserve, not for six more b-trees.
+        const budget = tightBudget() + 40 * (2 * pageSize + 8);
+        const small: Migration = { version: 2, name: 'one_table', sql: tables(0, 1) };
+        const large: Migration = { version: 3, name: 'many_tables', sql: tables(1, 3) };
+
+        const error = migrationError(() => open([v1, small, large], budget));
+        assert.equal(error.code, 'MIGRATION_STORAGE_REQUIRED');
+        assert.equal(error.details['version'], 3);
+        assert.equal(userVersion(), 2, 'each migration commits on its own');
+        assert.ok(usedBytes() <= budget);
+      });
     });
   });
 });

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
-import { OrviaError } from '../../domain/errors.ts';
+import { isOrviaError, OrviaError } from '../../domain/errors.ts';
 import {
   databaseCapacity,
   databaseUsedBytes,
@@ -226,6 +226,69 @@ export function planMigrationStorage(input: {
   };
 }
 
+/**
+ * Tables and indexes in the schema; each is one b-tree. The storage reserve is sized from this,
+ * so the migrator and the store must count the same way.
+ */
+export function countSchemaBtrees(db: DatabaseSync): number {
+  const row = db.prepare('SELECT count(*) AS n FROM sqlite_schema WHERE rootpage > 0').get();
+  return Number(row?.['n']);
+}
+
+/**
+ * Runs inside the migration's transaction, before COMMIT. A migration can add tables and
+ * indexes, and the control reserve grows with the number of b-trees, so the reserve is
+ * re-checked against the schema SQLite actually has now, not against anything the migration
+ * declares.
+ */
+function assertReserveAfterMigration(
+  db: DatabaseSync,
+  migration: Migration,
+  context: {
+    databasePath: string;
+    backupDir: string;
+    budgetBytes: number;
+    backupPath: string | null;
+  },
+): void {
+  const pageSize = pragmaNumber(db, 'page_size');
+  const pageCount = pragmaNumber(db, 'page_count');
+  const btreeCount = countSchemaBtrees(db);
+  const usage = measureDatabaseFiles(context.databasePath, context.backupDir);
+  // The journal belongs to this transaction and is truncated at commit.
+  const fixedBytes = usage.backupBytes + usage.walBytes + usage.shmBytes;
+  const capacity = databaseCapacity({
+    budgetBytes: context.budgetBytes,
+    fixedBytes,
+    pageSize,
+    btreeCount,
+  });
+  if (pageCount <= capacity.writeMaxPages) return;
+  const perPage = 2 * pageSize + JOURNAL_RECORD_OVERHEAD_BYTES;
+  const reservePages = capacity.maxPages - capacity.writeMaxPages;
+  const estimatedRequiredTotalBytes =
+    (pageCount + reservePages) * perPage + JOURNAL_HEADER_BYTES + fixedBytes;
+  throw new OrviaError(
+    'MIGRATION_STORAGE_REQUIRED',
+    `migration v${migration.version} (${migration.name}) leaves no room for the control reserve ` +
+      `(${pageCount} pages, ${btreeCount} tables and indexes; writes stop at ` +
+      `${capacity.writeMaxPages} pages) and was rolled back. Raise storage.database_max_mb.`,
+    {
+      version: migration.version,
+      name: migration.name,
+      configuredLimitBytes: context.budgetBytes,
+      postMigrationPageCount: pageCount,
+      postMigrationBtreeCount: btreeCount,
+      writeMaxPages: capacity.writeMaxPages,
+      maxPages: capacity.maxPages,
+      estimatedRequiredTotalBytes,
+      requiredAdditionalBytes: Math.max(0, estimatedRequiredTotalBytes - context.budgetBytes),
+      backupPath: context.backupPath,
+      configKey: 'storage.database_max_mb',
+    },
+  );
+}
+
 function storageError(message: string, plan: MigrationStoragePlan, extra: object = {}) {
   return new OrviaError('MIGRATION_STORAGE_REQUIRED', message, {
     ...plan,
@@ -306,9 +369,7 @@ export function applyMigrations(
     pageSize: pragmaNumber(db, 'page_size'),
     pageCount: pragmaNumber(db, 'page_count'),
     freelistCount: pragmaNumber(db, 'freelist_count'),
-    btreeCount: Number(
-      db.prepare('SELECT count(*) AS n FROM sqlite_schema WHERE rootpage > 0').get()?.['n'],
-    ),
+    btreeCount: countSchemaBtrees(db),
     headroomBytes: pending.reduce((sum, migration) => sum + (migration.headroomBytes ?? 0), 0),
     needsBackup: fromVersion > 0,
     budgetBytes: options.budgetBytes,
@@ -347,15 +408,22 @@ export function applyMigrations(
         `INSERT INTO ${HISTORY_TABLE} (version, name, checksum, applied_at) VALUES (?, ?, ?, ?)`,
       ).run(migration.version, migration.name, checksumOf(migration), options.now().toISOString());
       db.exec(`PRAGMA user_version = ${migration.version}`);
+      assertReserveAfterMigration(db, migration, {
+        databasePath,
+        backupDir: options.backupDir,
+        budgetBytes: options.budgetBytes,
+        backupPath,
+      });
       db.exec('COMMIT');
     } catch (error) {
       if (db.isTransaction) db.exec('ROLLBACK');
+      if (isOrviaError(error)) throw error;
       if (errcode(error) === SQLITE_FULL) {
         throw storageError(
           `migration v${migration.version} (${migration.name}) grew beyond the database budget ` +
             'and was rolled back; raise storage.database_max_mb',
           plan,
-          { version: migration.version, backupPath },
+          { version: migration.version, name: migration.name, backupPath },
         );
       }
       throw new OrviaError(

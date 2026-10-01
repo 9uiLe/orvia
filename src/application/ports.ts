@@ -87,9 +87,11 @@ export interface RunRepository {
   current(workItemId: WorkItemId): AgentRun | null;
   listForWorkItem(workItemId: WorkItemId): AgentRun[];
   listRunning(): AgentRun[];
-  markAllRunningInterrupted(now: string): RunId[];
-  /** Deletes finished runs beyond `keep` per Work Item and returns their output refs. */
-  pruneFinished(keep: number): { runIds: RunId[]; outputRefs: string[] };
+  /** Returns false if the run was no longer running. */
+  markInterrupted(id: RunId, now: string): boolean;
+  /** Finished runs beyond the newest `keep` per Work Item. */
+  listFinishedBeyond(keep: number): { runId: RunId; outputRef: string | null }[];
+  delete(id: RunId): void;
   listOutputRefs(): string[];
 }
 

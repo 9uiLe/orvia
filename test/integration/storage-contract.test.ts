@@ -342,6 +342,107 @@ describe('storage contract: database_max_mb is never exceeded', () => {
     assert.ok(observed.total <= 5 * MIB, `peak ${observed.total}`);
   });
 
+  async function fillToWriteCapacity(d: Daemon): Promise<void> {
+    for (const size of [64 * KIB, 4 * KIB, 100]) {
+      for (let i = 0; i < 5000; i++) {
+        try {
+          await call(d.app, 'add_context', { planId: 'P-1', body: 'x'.repeat(size) });
+        } catch {
+          break;
+        }
+      }
+    }
+  }
+
+  /** Releases the database the way a crash would: no shutdown, so no run is recorded. */
+  function crash(d: Daemon): void {
+    d.store.close();
+    daemon = null;
+  }
+
+  test('startup recovers a thousand runs at the write capacity, one run per transaction', async () => {
+    const d0 = await start(8);
+    await call(d0.app, 'create_plan', { title: 'P' });
+    const store = d0.app.deps.store;
+    const runIds: string[] = [];
+    for (let i = 0; i < 1000; i++) {
+      const item = await call<{ id: string }>(d0.app, 'create_work_item', {
+        planId: 'P-1',
+        title: `W ${i}`,
+      });
+      const run = store.transaction(() =>
+        store.runs.insert({
+          workItemId: item.id as `W-${number}`,
+          agent: 'fake',
+          outputRef: `runs/${i}.log`,
+          now: new Date().toISOString(),
+        }),
+      );
+      runIds.push(run.id);
+    }
+    await fillToWriteCapacity(d0);
+    const full = await call<{ assessment: { database: { level: string } } }>(
+      d0.app,
+      'get_storage_status',
+    );
+    assert.equal(full.assessment.database.level, 'HARD_LIMIT', 'only the reserve is left');
+    crash(d0);
+
+    const peak = await sampler();
+    const d = await start(8);
+    const observed = await peak.stop();
+    assert.ok(observed.total <= 8 * MIB, `peak ${observed.total}`);
+    const status = await call<{ runningRuns: number }>(d.app, 'get_status');
+    assert.equal(status.runningRuns, 0);
+    const statuses = new Set(
+      runIds.map((id) => d.app.deps.store.runs.get(id as `R-${number}`)?.status),
+    );
+    assert.deepEqual([...statuses], ['interrupted']);
+  });
+
+  test('recovery that stopped halfway finishes on the next start', async () => {
+    const d0 = await start(16);
+    await call(d0.app, 'create_plan', { title: 'P' });
+    const store = d0.app.deps.store;
+    const runs = [];
+    for (let i = 0; i < 3; i++) {
+      const item = await call<{ id: `W-${number}` }>(d0.app, 'create_work_item', {
+        planId: 'P-1',
+        title: `W ${i}`,
+      });
+      runs.push(
+        store.transaction(() =>
+          store.runs.insert({
+            workItemId: item.id,
+            agent: 'fake',
+            outputRef: `runs/halfway-${i}.log`,
+            now: '2026-01-01T00:00:00.000Z',
+          }),
+        ),
+      );
+    }
+    const [first, second, third] = runs;
+    assert.ok(first !== undefined && second !== undefined && third !== undefined);
+    // As if the previous recovery had committed only the first run before dying.
+    store.transaction(
+      () => store.runs.markInterrupted(first.id, '2026-01-02T00:00:00.000Z'),
+      'reserve',
+    );
+    crash(d0);
+
+    const d = await start(16);
+    const after = [first, second, third].map((run) => d.app.deps.store.runs.get(run.id));
+    assert.deepEqual(
+      after.map((run) => run?.status),
+      ['interrupted', 'interrupted', 'interrupted'],
+    );
+    assert.equal(
+      after[0]?.finishedAt,
+      '2026-01-02T00:00:00.000Z',
+      'already recovered runs are left as they were',
+    );
+  });
+
   test('sorting and multi-row changes create no files in the OS temporary directory', async () => {
     const watched = join(env.root, 'sqlite-temp');
     mkdirSync(watched);
