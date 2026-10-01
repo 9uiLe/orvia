@@ -48,8 +48,9 @@ and `Origin`/`Host` validation.
 
 ## Verification
 
-- MCP clients of the SDK v2 (protocol 2026-07-28) and SDK v1.31 (earlier revisions) list and
-  call tools against `orvia mcp` in the integration tests.
+- The integration tests run `orvia mcp` against the official SDK v2 client (protocol
+  2026-07-28), which lists and calls tools, and against a raw JSON-RPC client that performs the
+  2025-06-18 `initialize` handshake and calls tools.
 - An end-to-end connection from ChatGPT through a Secure MCP Tunnel has **not** been tested.
 
 ## Consequences

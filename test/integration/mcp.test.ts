@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { after, before, describe, test } from 'node:test';
-import { Client as LegacyClient } from '@modelcontextprotocol/sdk/client/index.js';
-import { StdioClientTransport as LegacyStdio } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { spawn } from 'node:child_process';
+import { createInterface } from 'node:readline';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { OPERATIONS } from '../../src/application/operations.ts';
@@ -65,20 +65,49 @@ describe('MCP server over stdio', () => {
     }
   });
 
-  test('a client on an earlier protocol revision (SDK v1) also works', async () => {
-    const client = new LegacyClient({ name: 'orvia-legacy-test', version: '0.0.0' });
-    await client.connect(new LegacyStdio(serverParams()));
+  test('a client on an earlier protocol revision (2025-06-18) also works', async () => {
+    // Raw newline-delimited JSON-RPC, as older clients send it: initialize handshake first.
+    const params = serverParams();
+    const child = spawn(params.command, params.args, { env: params.env, stdio: 'pipe' });
+    const pending = new Map<number, (message: Record<string, unknown>) => void>();
+    createInterface({ input: child.stdout }).on('line', (line) => {
+      const message = JSON.parse(line) as { id?: number } & Record<string, unknown>;
+      if (typeof message.id === 'number') pending.get(message.id)?.(message);
+    });
+    let nextId = 0;
+    const request = (method: string, body: unknown) =>
+      new Promise<Record<string, unknown>>((resolve) => {
+        const id = ++nextId;
+        pending.set(id, resolve);
+        child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params: body }) + '\n');
+      });
     try {
-      const status = (await client.callTool({ name: 'get_status', arguments: {} })) as ToolResult;
-      assert.equal(status.structuredContent?.['activePlans'], 1);
-      const invalid = (await client.callTool({
+      const init = await request('initialize', {
+        protocolVersion: '2025-06-18',
+        capabilities: {},
+        clientInfo: { name: 'orvia-legacy-test', version: '0.0.0' },
+      });
+      assert.equal((init['result'] as { protocolVersion: string }).protocolVersion, '2025-06-18');
+      child.stdin.write(
+        JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n',
+      );
+
+      const status = await request('tools/call', { name: 'get_status', arguments: {} });
+      const statusResult = status['result'] as ToolResult;
+      assert.equal(statusResult.structuredContent?.['activePlans'], 1);
+
+      const invalid = await request('tools/call', {
         name: 'pause_work_item',
         arguments: { workItemId: 'W-404' },
-      })) as ToolResult;
-      assert.equal(invalid.isError, true);
-      assert.equal((invalid.structuredContent?.['error'] as { code: string }).code, 'NOT_FOUND');
+      });
+      const invalidResult = invalid['result'] as ToolResult;
+      assert.equal(invalidResult.isError, true);
+      assert.equal(
+        (invalidResult.structuredContent?.['error'] as { code: string }).code,
+        'NOT_FOUND',
+      );
     } finally {
-      await client.close();
+      child.kill();
     }
   });
 
