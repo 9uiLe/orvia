@@ -1,5 +1,4 @@
 import { readFileSync } from 'node:fs';
-import { parse } from 'smol-toml';
 import * as z from 'zod/v4';
 import { OrviaError } from '../domain/errors.ts';
 import type { StorageLimits } from '../domain/storage.ts';
@@ -34,13 +33,7 @@ const configSchema = z.strictObject({
 
 export type OrviaConfig = z.output<typeof configSchema>;
 
-export function parseConfig(source: string, origin: string): OrviaConfig {
-  let raw: unknown;
-  try {
-    raw = parse(source);
-  } catch (error) {
-    throw new OrviaError('CONFIG_INVALID', `${origin}: ${(error as Error).message}`, { origin });
-  }
+export function validateConfig(raw: unknown, origin: string): OrviaConfig {
   const result = configSchema.safeParse(raw);
   if (!result.success) {
     throw new OrviaError('CONFIG_INVALID', `${origin}:\n${z.prettifyError(result.error)}`, {
@@ -50,13 +43,23 @@ export function parseConfig(source: string, origin: string): OrviaConfig {
   return result.data;
 }
 
+export function parseConfig(source: string, origin: string): OrviaConfig {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(source);
+  } catch (error) {
+    throw new OrviaError('CONFIG_INVALID', `${origin}: ${(error as Error).message}`, { origin });
+  }
+  return validateConfig(raw, origin);
+}
+
 /** A missing file means "all defaults"; Orvia never writes the config file itself. */
 export function loadConfig(path: string): OrviaConfig {
   let source: string;
   try {
     source = readFileSync(path, 'utf8');
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return parseConfig('', path);
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return validateConfig({}, path);
     throw new OrviaError('CONFIG_INVALID', `cannot read ${path}: ${(error as Error).message}`);
   }
   return parseConfig(source, path);

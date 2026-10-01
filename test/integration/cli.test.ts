@@ -61,7 +61,7 @@ describe('orvia CLI', () => {
   });
 
   test('doctor reports an invalid configuration', () => {
-    writeConfig(env, '[storage]\ncache_max_mb = -1\n');
+    writeConfig(env, JSON.stringify({ storage: { cache_max_mb: -1 } }));
     const result = orvia('doctor', '--json');
     assert.equal(result.status, 1);
     const checks = JSON.parse(result.stdout) as { name: string; status: string }[];

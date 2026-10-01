@@ -2,7 +2,7 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync, mkdirSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Clock, Logger } from '../../src/application/ports.ts';
-import { parseConfig, type OrviaConfig } from '../../src/infrastructure/config.ts';
+import { validateConfig, type OrviaConfig } from '../../src/infrastructure/config.ts';
 import { resolvePaths, type OrviaPaths } from '../../src/infrastructure/paths.ts';
 
 export interface TestEnv {
@@ -39,13 +39,13 @@ export function makeTestEnv(): TestEnv {
   };
 }
 
-export function writeConfig(env: TestEnv, toml: string): void {
+export function writeConfig(env: TestEnv, json: string): void {
   mkdirSync(env.paths.configDir, { recursive: true });
-  writeFileSync(env.paths.configFile, toml);
+  writeFileSync(env.paths.configFile, json);
 }
 
-export function config(toml = ''): OrviaConfig {
-  return parseConfig(toml, 'test');
+export function config(raw: Record<string, unknown> = {}): OrviaConfig {
+  return validateConfig(raw, 'test');
 }
 
 export const silentLogger: Logger = {

@@ -28,8 +28,11 @@ describe('bounded storage', () => {
     env.cleanup();
   });
 
-  async function start(toml = '', agent = new FakeAgent()): Promise<Daemon> {
-    daemon = await startTestDaemon(env, { config: config(toml), agent });
+  async function start(
+    storage: Record<string, number> = {},
+    agent = new FakeAgent(),
+  ): Promise<Daemon> {
+    daemon = await startTestDaemon(env, { config: config({ storage }), agent });
     return daemon;
   }
 
@@ -82,7 +85,7 @@ describe('bounded storage', () => {
   });
 
   test('quota approaching: levels rise through PRESSURE and WARNING to HARD_LIMIT', async () => {
-    const d = await start('[storage]\ncache_max_mb = 1');
+    const d = await start({ cache_max_mb: 1 });
     const level = async () => (await d.app.storage.assess()).cache.level;
     assert.equal(await level(), 'NORMAL');
     writeCacheFile('a.log', Math.ceil(0.75 * MIB));
@@ -94,7 +97,7 @@ describe('bounded storage', () => {
   });
 
   test('cleanup starts automatically after a write when storage is under pressure', async () => {
-    const d = await start('[storage]\ncache_max_mb = 1');
+    const d = await start({ cache_max_mb: 1 });
     writeCacheFile('old.log', Math.ceil(0.8 * MIB));
     await call(d.app, 'create_plan', { title: 'trigger' });
     for (let i = 0; i < 200 && (await d.app.storage.assess()).cache.level !== 'NORMAL'; i++) {
@@ -104,7 +107,7 @@ describe('bounded storage', () => {
   });
 
   test('hard quota: new work is refused while status, controls, and maintenance still work', async () => {
-    const d = await start('[storage]\ndatabase_max_mb = 5');
+    const d = await start({ database_max_mb: 5 });
     const { item } = await boundWorkItem(d);
     const body = 'x'.repeat(64 * KIB);
     // Fill durable data until even a cleanup (which checkpoints the WAL) cannot relieve it.
@@ -134,7 +137,7 @@ describe('bounded storage', () => {
   });
 
   test('SQLite max_page_count is the last fuse even if the gate is bypassed', async () => {
-    const d = await start('[storage]\ndatabase_max_mb = 5');
+    const d = await start({ database_max_mb: 5 });
     await call(d.app, 'create_plan', { title: 'P' });
     const store = d.app.deps.store;
     assert.throws(
@@ -154,7 +157,7 @@ describe('bounded storage', () => {
   });
 
   test('cache eviction removes the oldest entries until below the PRESSURE threshold', async () => {
-    const d = await start('[storage]\ncache_max_mb = 1');
+    const d = await start({ cache_max_mb: 1 });
     const files = Array.from({ length: 10 }, (_, i) =>
       writeCacheFile(`f${i}.log`, 100 * KIB, (10 - i) / 1000),
     );
@@ -167,7 +170,7 @@ describe('bounded storage', () => {
   });
 
   test('TTL: expired cache entries and migration backups are removed, fresh ones kept', async () => {
-    const d = await start('[storage]\nretention_days = 7');
+    const d = await start({ retention_days: 7 });
     const expired = writeCacheFile('expired.log', KIB, 8);
     const fresh = writeCacheFile('fresh.log', KIB, 1);
     const oldBackup = join(env.paths.backupDir, 'state-v0-old.db');
@@ -183,7 +186,7 @@ describe('bounded storage', () => {
 
   test('durable data is preserved while finished runs are pruned to the configured count', async () => {
     const agent = new FakeAgent();
-    const d = await start('[storage]\nmax_completed_runs_per_work_item = 2', agent);
+    const d = await start({ max_completed_runs_per_work_item: 2 }, agent);
     const { item } = await boundWorkItem(d);
     await call(d.app, 'record_decision', { planId: 'P-1', title: 'Use X', body: 'because' });
     await call(d.app, 'add_context', { workItemId: item.id, body: 'context' });
@@ -216,7 +219,7 @@ describe('bounded storage', () => {
 
   test('the output of a running agent is never evicted', async () => {
     const agent = new FakeAgent();
-    const d = await start('[storage]\ncache_max_mb = 1', agent);
+    const d = await start({ cache_max_mb: 1 }, agent);
     const { item } = await boundWorkItem(d);
     const release = join(env.root, 'release');
     agent.mode = `wait:${release}`;
@@ -240,7 +243,7 @@ describe('bounded storage', () => {
   test('agent output is truncated at the cache limit instead of growing past it', async () => {
     const agent = new FakeAgent();
     agent.mode = `bytes:${2 * MIB}`;
-    const d = await start('[storage]\ncache_max_mb = 1', agent);
+    const d = await start({ cache_max_mb: 1 }, agent);
     const { item } = await boundWorkItem(d);
     const run = await runToEnd(d, item.id);
     const { run: finished } = await call<{ run: AgentRun }>(d.app, 'get_run_output', {
@@ -269,7 +272,7 @@ describe('bounded storage', () => {
       t.skip('root ignores directory permissions');
       return;
     }
-    const d = await start('[storage]\nretention_days = 1');
+    const d = await start({ retention_days: 1 });
     const stuck = writeCacheFile('stuck.log', KIB, 3);
     const runsDir = join(env.paths.cacheDir, 'runs');
     chmodSync(runsDir, 0o500);
@@ -284,7 +287,7 @@ describe('bounded storage', () => {
   });
 
   test('storage cleanup never changes a git repository or worktree', async () => {
-    const d = await start('[storage]\ncache_max_mb = 1\nretention_days = 1');
+    const d = await start({ cache_max_mb: 1, retention_days: 1 });
     const { item, repo } = await boundWorkItem(d);
     const worktree = item.workspace?.worktreeRoot ?? join(env.root, 'wt');
     writeFileSync(join(worktree, 'untracked.txt'), 'keep me');

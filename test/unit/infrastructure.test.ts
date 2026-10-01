@@ -3,7 +3,7 @@ import { describe, test } from 'node:test';
 import * as z from 'zod/v4';
 import { OPERATIONS } from '../../src/application/operations.ts';
 import { claudeAdapter, codexAdapter } from '../../src/infrastructure/agents/adapters.ts';
-import { parseConfig, storageLimits } from '../../src/infrastructure/config.ts';
+import { parseConfig, storageLimits, validateConfig } from '../../src/infrastructure/config.ts';
 import { resolvePaths } from '../../src/infrastructure/paths.ts';
 
 const platform = (name: NodeJS.Platform, env: Record<string, string> = {}) => ({
@@ -17,7 +17,7 @@ const platform = (name: NodeJS.Platform, env: Record<string, string> = {}) => ({
 
 describe('configuration', () => {
   test('an empty file yields the documented defaults', () => {
-    const config = parseConfig('', 'test');
+    const config = validateConfig({}, 'test');
     assert.deepEqual(config.storage, {
       database_max_mb: 128,
       cache_max_mb: 512,
@@ -30,23 +30,24 @@ describe('configuration', () => {
   });
 
   test('invalid values are rejected', () => {
-    for (const toml of [
-      '[storage]\ncache_max_mb = 0',
-      '[storage]\ndatabase_max_mb = 1.5',
-      '[storage]\nretention_days = -1',
-      '[storage]\npressure_percent = 95\nwarning_percent = 90',
-      '[storage]\nunknown_key = 1',
-      'log_level = "verbose"',
-      'not toml at all [',
+    for (const source of [
+      '{"storage": {"cache_max_mb": 0}}',
+      '{"storage": {"database_max_mb": 1.5}}',
+      '{"storage": {"retention_days": -1}}',
+      '{"storage": {"pressure_percent": 95, "warning_percent": 90}}',
+      '{"storage": {"unknown_key": 1}}',
+      '{"log_level": "verbose"}',
+      '[]',
+      'not json at all {',
     ]) {
-      assert.throws(() => parseConfig(toml, 'test'), { code: 'CONFIG_INVALID' }, toml);
+      assert.throws(() => parseConfig(source, 'test'), { code: 'CONFIG_INVALID' }, source);
     }
   });
 
   test('the database limit must leave room above the maintenance reserve', () => {
-    const config = parseConfig('[storage]\ndatabase_max_mb = 3', 'test');
+    const config = validateConfig({ storage: { database_max_mb: 3 } }, 'test');
     assert.throws(() => storageLimits(config, 4_096_000), { code: 'CONFIG_INVALID' });
-    const limits = storageLimits(parseConfig('', 'test'), 4_096_000);
+    const limits = storageLimits(validateConfig({}, 'test'), 4_096_000);
     assert.equal(limits.databaseMaxBytes, 128 * 1024 * 1024);
   });
 });
@@ -54,7 +55,7 @@ describe('configuration', () => {
 describe('paths', () => {
   test('Linux follows XDG base directories', () => {
     const paths = resolvePaths(platform('linux', { XDG_RUNTIME_DIR: '/run/user/501' }));
-    assert.equal(paths.configFile, '/home/u/.config/orvia/config.toml');
+    assert.equal(paths.configFile, '/home/u/.config/orvia/config.json');
     assert.equal(paths.databaseFile, '/home/u/.local/share/orvia/state.db');
     assert.equal(paths.cacheDir, '/home/u/.cache/orvia');
     assert.equal(paths.socketPath, '/run/user/501/orvia/orvia.sock');

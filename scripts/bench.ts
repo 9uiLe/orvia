@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { invokeOperation } from '../src/application/operations.ts';
-import { parseConfig } from '../src/infrastructure/config.ts';
+import { validateConfig } from '../src/infrastructure/config.ts';
 import { createLogger } from '../src/infrastructure/logger.ts';
 import { resolvePaths } from '../src/infrastructure/paths.ts';
 import { startDaemon } from '../src/interface/daemon/daemon.ts';
@@ -58,7 +58,7 @@ async function measure(fn: () => Promise<unknown>): Promise<string> {
 
 const daemon = await startDaemon({
   paths,
-  config: parseConfig('', 'bench'),
+  config: validateConfig({}, 'bench'),
   logger: createLogger('error'),
 });
 try {

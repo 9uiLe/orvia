@@ -25,15 +25,22 @@ counts.
 
 ### Limits and defaults
 
-```toml
-[storage]
-database_max_mb = 128              # state.db + WAL + SHM + migration backups
-cache_max_mb = 512                 # everything under the cache directory
-retention_days = 7                 # cache entries and migration backups
-max_completed_runs_per_work_item = 5
-pressure_percent = 70              # start cleanup
-warning_percent = 90               # report WARNING
+```json
+{
+  "storage": {
+    "database_max_mb": 128,
+    "cache_max_mb": 512,
+    "retention_days": 7,
+    "max_completed_runs_per_work_item": 5,
+    "pressure_percent": 70,
+    "warning_percent": 90
+  }
+}
 ```
+
+`database_max_mb` covers state.db, WAL, SHM, and migration backups. `cache_max_mb` covers
+everything under the cache directory. `retention_days` applies to cache entries and migration
+backups. Cleanup starts at `pressure_percent`, and status reports `WARNING` at `warning_percent`.
 
 Provenance: the four size and count defaults are the values proposed in the project brief; the
 two thresholds were chosen by the maintainer. None of them is derived from measurements yet.

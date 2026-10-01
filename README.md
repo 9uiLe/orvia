@@ -93,7 +93,8 @@ Decisions: [runtime and Nix](docs/adr/0001-runtime-and-nix.md) ·
 [SQLite](docs/adr/0002-sqlite.md) · [Plans and Work Items](docs/adr/0003-plan-work-item-model.md) ·
 [storage](docs/adr/0004-storage-policy.md) ·
 [repository isolation](docs/adr/0005-repository-isolation.md) ·
-[MCP boundary](docs/adr/0006-local-mcp-boundary.md)
+[MCP boundary](docs/adr/0006-local-mcp-boundary.md) ·
+[external dependencies](docs/adr/0007-external-dependencies.md)
 
 ## Implemented vs planned
 
@@ -186,8 +187,8 @@ URL or a **Secure MCP Tunnel**, which can launch a local stdio server. To use Or
 2. Configure a Secure MCP Tunnel whose server command is `orvia mcp`.
 3. In ChatGPT, create a developer-mode app and select the tunnel.
 
-Verification status: `orvia mcp` is tested with MCP SDK clients for protocol 2026-07-28 and for
-the earlier revisions. **A connection from ChatGPT itself has not been tested.** Do not expose
+Verification status: `orvia mcp` is tested with the MCP SDK client for protocol 2026-07-28 and
+with a raw JSON-RPC client speaking revision 2025-06-18. **A connection from ChatGPT itself has not been tested.** Do not expose
 Orvia through a public URL: it has no authentication.
 
 Other MCP clients that can launch a stdio server work the same way (untested examples):
@@ -226,26 +227,40 @@ Details: [ADR 0004](docs/adr/0004-storage-policy.md).
 
 ## Storage configuration
 
-`config.toml` in the config directory (`~/Library/Application Support/orvia/` on macOS,
+`config.json` in the config directory (`~/Library/Application Support/orvia/` on macOS,
 `~/.config/orvia/` on Linux). All keys are optional; these are the defaults:
 
-```toml
-log_level = "info"                     # error | warn | info | debug | trace
-
-[storage]
-database_max_mb = 128                  # state.db + WAL + SHM + migration backups
-cache_max_mb = 512                     # agent output cache
-retention_days = 7                     # cache entries and migration backups
-max_completed_runs_per_work_item = 5
-pressure_percent = 70                  # cleanup starts
-warning_percent = 90                   # status reports WARNING
-
-[agents.codex]
-command = "codex"                      # path or name on PATH
-[agents.claude]
-command = "claude"
+```json
+{
+  "log_level": "info",
+  "storage": {
+    "database_max_mb": 128,
+    "cache_max_mb": 512,
+    "retention_days": 7,
+    "max_completed_runs_per_work_item": 5,
+    "pressure_percent": 70,
+    "warning_percent": 90
+  },
+  "agents": {
+    "codex": { "command": "codex" },
+    "claude": { "command": "claude" }
+  }
+}
 ```
 
+| Key                                        | Meaning                                      |
+| ------------------------------------------ | -------------------------------------------- |
+| `log_level`                                | `error`, `warn`, `info`, `debug`, or `trace` |
+| `storage.database_max_mb`                  | state.db + WAL + SHM + migration backups     |
+| `storage.cache_max_mb`                     | agent output cache                           |
+| `storage.retention_days`                   | cache entries and migration backups          |
+| `storage.max_completed_runs_per_work_item` | finished run records kept per Work Item      |
+| `storage.pressure_percent`                 | cleanup starts                               |
+| `storage.warning_percent`                  | status reports `WARNING`                     |
+| `agents.<name>.command`                    | executable name on `PATH`, or a path         |
+
+JSON instead of TOML keeps the runtime free of a parser dependency
+([ADR 0007](docs/adr/0007-external-dependencies.md)).
 The size defaults come from the project brief and the thresholds were set by the maintainer.
 They are starting points to revisit with real usage data, not measured optima. Invalid values
 stop the daemon with `CONFIG_INVALID`.

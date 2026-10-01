@@ -80,7 +80,7 @@ export function resolvePaths(platform: PlatformInfo = currentPlatform()): OrviaP
   const runtimeDir = env['ORVIA_RUNTIME_DIR'] ?? base.runtime;
   return {
     configDir,
-    configFile: join(configDir, 'config.toml'),
+    configFile: join(configDir, 'config.json'),
     dataDir,
     databaseFile: join(dataDir, 'state.db'),
     backupDir: join(dataDir, 'backups'),

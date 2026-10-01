@@ -22,7 +22,7 @@ metadata files to them would leak Orvia into every project that uses it.
 
 |        | macOS                                             | Linux and other Unix                                          | Windows (untested)                 |
 | ------ | ------------------------------------------------- | ------------------------------------------------------------- | ---------------------------------- |
-| config | `~/Library/Application Support/orvia/config.toml` | `$XDG_CONFIG_HOME/orvia` (`~/.config/orvia`)                  | `%APPDATA%\orvia`                  |
+| config | `~/Library/Application Support/orvia/config.json` | `$XDG_CONFIG_HOME/orvia` (`~/.config/orvia`)                  | `%APPDATA%\orvia`                  |
 | data   | `~/Library/Application Support/orvia/`            | `$XDG_DATA_HOME/orvia` (`~/.local/share/orvia`)               | `%LOCALAPPDATA%\orvia\data`        |
 | cache  | `~/Library/Caches/orvia/`                         | `$XDG_CACHE_HOME/orvia` (`~/.cache/orvia`)                    | `%LOCALAPPDATA%\orvia\cache`       |
 | socket | `$TMPDIR/orvia-<uid>/orvia.sock`                  | `$XDG_RUNTIME_DIR/orvia/orvia.sock`, else `/tmp/orvia-<uid>/` | named pipe `\\.\pipe\orvia-<user>` |

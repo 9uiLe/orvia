@@ -19,4 +19,5 @@ Before 1.0.0, minor versions may contain breaking changes.
   newer schemas.
 - Configurable storage limits with pressure levels, automatic cleanup, and `HARD_LIMIT` gating.
 - `orvia` CLI, local IPC socket, and an MCP server over stdio.
+- JSON configuration (`config.json`) validated at startup.
 - `AgentAdapter` abstraction with experimental Codex and Claude Code adapters.
