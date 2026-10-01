@@ -10,9 +10,19 @@ updates:
     groups:
       npm-minor-patch:
         update-types: ['minor', 'patch']
+    # `ignore` also suppresses security-update PRs for the matched versions, so it is limited to
+    # majors of development-only tools that never ship in dist/. Their minor and patch
+    # releases, all runtime dependencies, and Dependabot alerts are unaffected. These majors
+    # are upgraded by hand together with the toolchain (docs/adr/0007-external-dependencies.md).
     ignore:
-      # @types/node must match the Node.js major pinned in flake.nix; bump both together.
+      # Must match the Node.js major pinned in flake.nix. Upgrade both in one PR when moving
+      # to the next Node.js LTS.
       - dependency-name: '@types/node'
+        update-types: ['version-update:semver-major']
+      # A new TypeScript major is unusable until typescript-eslint's peer range accepts it;
+      # Dependabot cannot resolve that and fails every run. Upgrade both together once
+      # typescript-eslint supports the new major.
+      - dependency-name: 'typescript'
         update-types: ['version-update:semver-major']
   - package-ecosystem: 'github-actions'
     directory: '/'
