@@ -267,11 +267,20 @@ describe('database migrations', () => {
   describe('storage budget', () => {
     test('enough capacity for database, journal, backup, and reserve: migration succeeds', () => {
       seed(2 * MIB);
+      const before = new DatabaseSync(env.paths.databaseFile);
+      const pagesInUse =
+        Number(pragma(before, 'page_count')) - Number(pragma(before, 'freelist_count'));
+      const pageSize = Number(pragma(before, 'page_size'));
+      before.close();
       const migrated = open([v1, v2], 16 * MIB);
       try {
         assert.deepEqual(migrated.migration.applied, [2]);
         assert.ok(migrated.migration.backupPath !== null);
         assert.equal(pragma(migrated.db, 'journal_mode'), 'wal', 'WAL is restored afterwards');
+        assert.ok(
+          statSync(migrated.migration.backupPath).size <= pagesInUse * pageSize,
+          'the backup fits the preflight estimate (pages in use × page size)',
+        );
       } finally {
         migrated.db.close();
       }

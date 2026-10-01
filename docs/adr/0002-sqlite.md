@@ -103,6 +103,10 @@ worktree and per branch, one running run per Work Item.
   limit before upgrading. Because the daemon cannot start until migrations succeed, `orvia
 cleanup` is not available at that point. Old backups can be deleted from the backup directory
   by hand.
+- Per the SQLite documentation, `VACUUM INTO` writes the vacuumed copy directly into the target
+  file instead of the transient database a plain `VACUUM` uses. Any other temporary files SQLite
+  creates (for example, sort files while rebuilding indexes) go to the OS temporary directory
+  (`SQLITE_TMPDIR`, `TMPDIR`) and are not counted against `database_max_mb`.
 - Backups and the rollback journal count toward the database budget. Backups expire after
   `retention_days`.
 - Large changes follow expand → migrate/backfill → contract across releases. A migration that
