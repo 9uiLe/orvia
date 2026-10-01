@@ -1,13 +1,19 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdirSync, readdirSync, readFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
+import { OrviaError } from '../../src/domain/errors.ts';
+import { databaseUsedBytes } from '../../src/domain/storage.ts';
+import { measureDatabaseFiles } from '../../src/infrastructure/sqlite/database-files.ts';
 import { openDatabase } from '../../src/infrastructure/sqlite/database.ts';
 import { ORVIA_APPLICATION_ID, type Migration } from '../../src/infrastructure/sqlite/migrator.ts';
 import { MIGRATIONS } from '../../src/infrastructure/sqlite/migrations/index.ts';
 import { call, rejectsWith, startTestDaemon } from '../helpers/app.ts';
 import { ManualClock, makeTestEnv, type TestEnv } from '../helpers/env.ts';
+
+const MIB = 1024 * 1024;
 
 const v1: Migration = {
   version: 1,
@@ -47,13 +53,49 @@ describe('database migrations', () => {
     env.cleanup();
   });
 
-  function open(migrations: readonly Migration[]) {
+  function open(migrations: readonly Migration[], databaseMaxBytes = 128 * MIB) {
     return openDatabase({
       path: env.paths.databaseFile,
       backupDir: env.paths.backupDir,
       migrations,
       now: () => clock.now(),
+      databaseMaxBytes,
     });
+  }
+
+  /** Creates a v1 database holding roughly `bytes` of data. */
+  function seed(bytes: number): void {
+    const opened = open([v1]);
+    opened.db
+      .prepare(
+        `WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?)
+         INSERT INTO items (name) SELECT hex(randomblob(1000)) FROM n`,
+      )
+      .run(Math.ceil(bytes / 2000));
+    opened.db.close();
+  }
+
+  function usedBytes(): number {
+    return databaseUsedBytes(measureDatabaseFiles(env.paths.databaseFile, env.paths.backupDir));
+  }
+
+  function userVersion(): number {
+    const db = new DatabaseSync(env.paths.databaseFile);
+    try {
+      return Number(pragma(db, 'user_version'));
+    } finally {
+      db.close();
+    }
+  }
+
+  function migrationError(fn: () => unknown): OrviaError {
+    try {
+      fn();
+    } catch (error) {
+      if (error instanceof OrviaError) return error;
+      throw error;
+    }
+    throw new Error('expected the migration to fail');
   }
 
   function pragma(db: DatabaseSync, name: string): unknown {
@@ -221,5 +263,99 @@ describe('database migrations', () => {
     } finally {
       await daemon.close();
     }
+  });
+  describe('storage budget', () => {
+    test('enough capacity for database, journal, backup, and reserve: migration succeeds', () => {
+      seed(2 * MIB);
+      const migrated = open([v1, v2], 16 * MIB);
+      try {
+        assert.deepEqual(migrated.migration.applied, [2]);
+        assert.ok(migrated.migration.backupPath !== null);
+        assert.equal(pragma(migrated.db, 'journal_mode'), 'wal', 'WAL is restored afterwards');
+      } finally {
+        migrated.db.close();
+      }
+      assert.ok(usedBytes() <= 16 * MIB);
+    });
+
+    test('a backup that would not fit is refused before anything changes', () => {
+      seed(2 * MIB);
+      const partial = join(env.paths.backupDir, 'state-v1-interrupted.db.partial');
+      mkdirSync(env.paths.backupDir, { recursive: true });
+      writeFileSync(partial, Buffer.alloc(1000));
+
+      const error = migrationError(() => open([v1, v2], 8 * MIB));
+      assert.equal(error.code, 'MIGRATION_STORAGE_REQUIRED');
+      const detail = (key: string) => Number(error.details[key]);
+      assert.equal(detail('configuredLimitBytes'), 8 * MIB);
+      assert.ok(detail('estimatedRequiredTotalBytes') > 8 * MIB);
+      assert.equal(
+        detail('requiredAdditionalBytes'),
+        detail('estimatedRequiredTotalBytes') - detail('currentUsageBytes'),
+      );
+      assert.equal(detail('currentUsageBytes'), usedBytes());
+
+      assert.equal(userVersion(), 1, 'schema unchanged');
+      assert.deepEqual(backups(), [], 'no backup and no partial backup left behind');
+    });
+
+    test('existing backups count toward the budget', () => {
+      seed(2 * MIB);
+      mkdirSync(env.paths.backupDir, { recursive: true });
+      const old = join(env.paths.backupDir, 'state-v0-earlier.db');
+      writeFileSync(old, Buffer.alloc(4 * MIB));
+
+      const error = migrationError(() => open([v1, v2], 12 * MIB));
+      assert.equal(error.code, 'MIGRATION_STORAGE_REQUIRED');
+      assert.equal((error.details as Record<string, number>)['existingBackupBytes'], 4 * MIB);
+      assert.equal(userVersion(), 1);
+
+      rmSync(old);
+      const migrated = open([v1, v2], 12 * MIB);
+      migrated.db.close();
+      assert.equal(userVersion(), 2, 'the same budget suffices without the old backup');
+    });
+
+    test('a migration that grows past the budget at run time is stopped and rolled back', () => {
+      seed(2 * MIB);
+      const grows: Migration = {
+        version: 2,
+        name: 'backfill',
+        sql: `WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20000)
+              INSERT INTO items (name) SELECT hex(randomblob(1000)) FROM n;`,
+      };
+      const error = migrationError(() => open([v1, grows], 16 * MIB));
+      assert.equal(error.code, 'MIGRATION_STORAGE_REQUIRED');
+      assert.equal(userVersion(), 1);
+      assert.ok(usedBytes() <= 16 * MIB, 'files stayed within the budget');
+      assert.equal(backups().length, 1, 'the backup is kept for recovery');
+    });
+
+    test('declared migration headroom is part of the preflight', () => {
+      seed(2 * MIB);
+      const declared: Migration = { ...v2, headroomBytes: 20 * MIB };
+      const error = migrationError(() => open([v1, declared], 16 * MIB));
+      assert.equal(error.code, 'MIGRATION_STORAGE_REQUIRED');
+      assert.deepEqual(backups(), [], 'refused before the backup was written');
+    });
+
+    test('a failing migration keeps the backup, and storage accounting includes it', () => {
+      seed(2 * MIB);
+      const error = migrationError(() => open([v1, broken], 16 * MIB));
+      assert.equal(error.code, 'MIGRATION_FAILED');
+      assert.equal(userVersion(), 1);
+
+      const backupPath = String(error.details['backupPath']);
+      const backup = new DatabaseSync(backupPath, { readOnly: true });
+      try {
+        assert.equal(pragma(backup, 'user_version'), 1);
+        assert.ok(Number(backup.prepare('SELECT count(*) AS n FROM items').get()?.['n']) > 0);
+      } finally {
+        backup.close();
+      }
+      const usage = measureDatabaseFiles(env.paths.databaseFile, env.paths.backupDir);
+      assert.equal(usage.backupBytes, statSync(backupPath).size);
+      assert.ok(databaseUsedBytes(usage) <= 16 * MIB);
+    });
   });
 });

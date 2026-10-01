@@ -100,7 +100,13 @@ describe('storage pressure', () => {
     maxCompletedRunsPerWorkItem: 5,
   };
   const usage = (databaseMib: number, cacheMib = 0): StorageUsage => ({
-    database: { mainBytes: databaseMib * MIB, walBytes: 0, shmBytes: 0, backupBytes: 0 },
+    database: {
+      mainBytes: databaseMib * MIB,
+      walBytes: 0,
+      shmBytes: 0,
+      journalBytes: 0,
+      backupBytes: 0,
+    },
     cacheBytes: cacheMib * MIB,
   });
 
@@ -120,6 +126,7 @@ describe('storage pressure', () => {
           mainBytes: 40 * MIB,
           walBytes: 20 * MIB,
           shmBytes: 1 * MIB,
+          journalBytes: 0,
           backupBytes: 40 * MIB,
         },
         cacheBytes: 0,

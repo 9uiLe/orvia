@@ -4,7 +4,12 @@ import type { AgentAdapter, Clock, Logger, ProcessLauncher } from '../../applica
 import { claudeAdapter, codexAdapter } from '../../infrastructure/agents/adapters.ts';
 import { NodeProcessLauncher } from '../../infrastructure/agents/process-launcher.ts';
 import { FileCache } from '../../infrastructure/cache/file-cache.ts';
-import { loadConfig, storageLimits, type OrviaConfig } from '../../infrastructure/config.ts';
+import {
+  databaseBudgetBytes,
+  loadConfig,
+  storageLimits,
+  type OrviaConfig,
+} from '../../infrastructure/config.ts';
 import { GitCli } from '../../infrastructure/git/git-cli.ts';
 import { GitWorkspaceInspector } from '../../infrastructure/git/workspace-inspector.ts';
 import { createLogger } from '../../infrastructure/logger.ts';
@@ -54,6 +59,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     backupDir: paths.backupDir,
     migrations: options.migrations ?? MIGRATIONS,
     now: () => clock.now(),
+    databaseMaxBytes: databaseBudgetBytes(config),
   });
   const store = new SqliteStore(opened.db, options.migrations ?? MIGRATIONS);
   let server: Server | null = null;

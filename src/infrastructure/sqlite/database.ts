@@ -16,6 +16,8 @@ export interface OpenDatabaseOptions {
   readonly backupDir: string;
   readonly migrations: readonly Migration[];
   readonly now: () => Date;
+  /** `storage.database_max_mb` in bytes. */
+  readonly databaseMaxBytes: number;
 }
 
 export interface OpenedDatabase {
@@ -82,15 +84,16 @@ export function openDatabase(options: OpenDatabaseOptions): OpenedDatabase {
     const header = readHeader(db);
     assertCompatible(header, latestVersion(options.migrations));
     if (header.pageCount === 0) initializeFreshDatabase(db);
-    if (pragmaValue(db, 'journal_mode = WAL') !== 'wal') {
-      throw new OrviaError('INTERNAL', 'could not enable WAL journal mode');
-    }
+    const pageSize = Number(pragmaValue(db, 'page_size'));
+    const walCheckpointBytes = Number(pragmaValue(db, 'wal_autocheckpoint')) * pageSize;
     const migration = applyMigrations(db, options.migrations, {
       backupDir: options.backupDir,
       now: options.now,
+      budget: { databaseMaxBytes: options.databaseMaxBytes, reserveBytes: walCheckpointBytes },
     });
-    const pageSize = Number(pragmaValue(db, 'page_size'));
-    const walCheckpointBytes = Number(pragmaValue(db, 'wal_autocheckpoint')) * pageSize;
+    if (pragmaValue(db, 'journal_mode = WAL') !== 'wal') {
+      throw new OrviaError('INTERNAL', 'could not enable WAL journal mode');
+    }
     // Truncate the WAL back to one checkpoint interval after each checkpoint.
     db.exec(`PRAGMA journal_size_limit = ${walCheckpointBytes}`);
     return { db, migration, pageSize, walCheckpointBytes };
@@ -101,8 +104,8 @@ export function openDatabase(options: OpenDatabaseOptions): OpenedDatabase {
 }
 
 /**
- * The last fuse: SQLite refuses to grow the main database file beyond this many bytes.
- * Set after migrations so that an upgrade is never blocked by the limit.
+ * The last fuse during normal operation: SQLite refuses to grow the main database file beyond
+ * this many bytes. Migrations use their own, tighter cap (see applyMigrations).
  */
 export function setDatabaseHardCap(opened: OpenedDatabase, maxBytes: number): void {
   const pages = Math.max(1, Math.floor(maxBytes / opened.pageSize));

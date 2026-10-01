@@ -42,6 +42,7 @@ describe('query plans', () => {
       backupDir: env.paths.backupDir,
       migrations: MIGRATIONS,
       now: () => new Date(),
+      databaseMaxBytes: 128 * 1024 * 1024,
     }).db;
     db.exec('ANALYZE');
   });

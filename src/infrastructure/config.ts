@@ -65,9 +65,13 @@ export function loadConfig(path: string): OrviaConfig {
   return parseConfig(source, path);
 }
 
+export function databaseBudgetBytes(config: OrviaConfig): number {
+  return config.storage.database_max_mb * MIB;
+}
+
 export function storageLimits(config: OrviaConfig, databaseReserveBytes: number): StorageLimits {
   const s = config.storage;
-  const databaseMaxBytes = s.database_max_mb * MIB;
+  const databaseMaxBytes = databaseBudgetBytes(config);
   if (databaseMaxBytes <= databaseReserveBytes) {
     throw new OrviaError(
       'CONFIG_INVALID',

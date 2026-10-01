@@ -18,6 +18,7 @@ export interface DatabaseUsage {
   readonly mainBytes: number;
   readonly walBytes: number;
   readonly shmBytes: number;
+  readonly journalBytes: number;
   readonly backupBytes: number;
 }
 
@@ -42,14 +43,15 @@ export interface StorageAssessment {
 /**
  * - `read`: never blocked.
  * - `control`: pause/resume and other human safety controls; never blocked.
- * - `maintenance`: cleanup and archive; never blocked because they are how pressure is relieved.
+ * - `maintenance`: cleanup (which frees space) and archive (a small status change that frees
+ *   almost none); never blocked, so work can be wound down and space reclaimed at the limit.
  * - `write`: durable writes; blocked when the database is at HARD_LIMIT.
  * - `agent_run`: starts output-producing work; blocked when either area is at HARD_LIMIT.
  */
 export type OperationClass = 'read' | 'control' | 'maintenance' | 'write' | 'agent_run';
 
 export function databaseUsedBytes(usage: DatabaseUsage): number {
-  return usage.mainBytes + usage.walBytes + usage.shmBytes + usage.backupBytes;
+  return usage.mainBytes + usage.walBytes + usage.shmBytes + usage.journalBytes + usage.backupBytes;
 }
 
 function assessArea(
