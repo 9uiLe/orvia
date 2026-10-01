@@ -99,10 +99,12 @@ export function databaseCapacity(input: {
 }
 
 /**
- * - `read`: never blocked.
- * - `control`: pause/resume and other human safety controls; never blocked.
+ * Admission at HARD_LIMIT (the pre-operation gate; SQLite may still refuse a reserve
+ * transaction once the shared reserve is used up):
+ * - `read`: never refused.
+ * - `control`: pause/resume and other human safety controls; not refused by the gate.
  * - `maintenance`: cleanup (which frees space) and archive (a small status change that frees
- *   almost none); never blocked, so work can be wound down and space reclaimed at the limit.
+ *   almost none); not refused by the gate, so work can be wound down and space reclaimed.
  * - `write`: durable writes; blocked when the database is at HARD_LIMIT.
  * - `agent_run`: starts output-producing work; blocked when either area is at HARD_LIMIT.
  */

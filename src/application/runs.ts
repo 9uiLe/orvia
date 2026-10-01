@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { OrviaError } from '../domain/errors.ts';
+import { isOrviaError, OrviaError } from '../domain/errors.ts';
 import type { RunId, WorkItemId } from '../domain/ids.ts';
 import type { AgentRun } from '../domain/records.ts';
 import { filesystemPolicyFor } from '../domain/sandbox.ts';
@@ -12,6 +12,34 @@ import type { StorageService } from './storage.ts';
 import { requireWorkItem, type RunControl } from './work-items.ts';
 
 type StopReason = 'cancelled' | 'interrupted';
+
+export type RecoveryResult =
+  | { readonly state: 'complete'; readonly recoveredRunIds: readonly RunId[] }
+  | {
+      readonly state: 'incomplete';
+      readonly recoveredRunIds: readonly RunId[];
+      readonly remainingRunIds: readonly RunId[];
+      readonly reason: 'STORAGE_HARD_LIMIT';
+    };
+
+export const RECOVERY_REMEDIATION =
+  'Run `orvia cleanup` (it helps if old run records or backups take the space; it cannot help ' +
+  'when durable data fills the budget) or raise storage.database_max_mb, then restart the daemon.';
+
+export function recoveryIncompleteError(
+  recovery: RecoveryResult,
+  operation: string,
+  runId?: RunId,
+): OrviaError {
+  const remaining = recovery.state === 'incomplete' ? recovery.remainingRunIds.length : 0;
+  return new OrviaError(
+    'RECOVERY_INCOMPLETE',
+    `${operation} is unavailable: ${remaining} run(s) of a previous daemon are still marked ` +
+      `running because the database storage reserve ran out during startup recovery. ` +
+      RECOVERY_REMEDIATION,
+    { operation, remainingRuns: remaining, ...(runId === undefined ? {} : { runId }) },
+  );
+}
 
 interface ActiveRun {
   readonly runId: RunId;
@@ -31,6 +59,7 @@ export class RunSupervisor implements RunControl {
   readonly #recorded = new Map<RunId, Promise<void>>();
   /** Work Items whose agents are being stopped; no new run may start for them meanwhile. */
   readonly #stopping = new Set<WorkItemId>();
+  #recovery: RecoveryResult = { state: 'complete', recoveredRunIds: [] };
 
   constructor(deps: Dependencies, storage: StorageService) {
     this.#deps = deps;
@@ -39,21 +68,44 @@ export class RunSupervisor implements RunControl {
 
   /**
    * Marks runs left `running` by a previous daemon process as interrupted, one run per
-   * transaction: control transactions must stay one-row changes to fit the storage reserve
-   * (ADR 0009), and recovery needs no atomicity across runs. If it stops halfway, the next
-   * start finishes the rest.
+   * transaction: control transactions must stay one-row changes (ADR 0009), and recovery needs
+   * no atomicity across runs. Runs already marked stay marked, so a later recovery only handles
+   * the runs still `running`.
+   *
+   * If the shared storage reserve runs out, recovery stops and reports the remaining runs
+   * instead of failing: the daemon then starts in a degraded state where it can be inspected and
+   * cleaned up. Restarting alone does not free reserve; cleanup or a larger
+   * storage.database_max_mb does. Any other error still fails startup.
    */
-  recover(): RunId[] {
+  recover(): RecoveryResult {
     const { store } = this.#deps;
-    const recovered: RunId[] = [];
-    for (const run of store.runs.listRunning()) {
-      const changed = store.transaction(
-        () => store.runs.markInterrupted(run.id, nowIso(this.#deps)),
-        'reserve',
-      );
-      if (changed) recovered.push(run.id);
+    const pending = store.runs.listRunning();
+    const recoveredRunIds: RunId[] = [];
+    for (const [index, run] of pending.entries()) {
+      try {
+        const changed = store.transaction(
+          () => store.runs.markInterrupted(run.id, nowIso(this.#deps)),
+          'reserve',
+        );
+        if (changed) recoveredRunIds.push(run.id);
+      } catch (error) {
+        if (!isOrviaError(error) || error.code !== 'STORAGE_HARD_LIMIT') throw error;
+        this.#recovery = {
+          state: 'incomplete',
+          recoveredRunIds,
+          remainingRunIds: pending.slice(index).map((remaining) => remaining.id),
+          reason: 'STORAGE_HARD_LIMIT',
+        };
+        return this.#recovery;
+      }
     }
-    return recovered;
+    this.#recovery = { state: 'complete', recoveredRunIds };
+    return this.#recovery;
+  }
+
+  /** The result of the last recovery; `incomplete` puts the daemon in its degraded state. */
+  recoveryStatus(): RecoveryResult {
+    return this.#recovery;
   }
 
   async start(input: {
@@ -203,6 +255,13 @@ export class RunSupervisor implements RunControl {
    */
   async pause<T>(workItemId: WorkItemId, commit: () => T): Promise<T> {
     this.#assertNotStopping(workItemId);
+    const current = this.#deps.store.runs.current(workItemId);
+    if (current !== null && !this.#active.has(workItemId)) {
+      // A `running` record this daemon does not own is an unrecovered run of a previous daemon.
+      // Pausing would show the Work Item paused next to a run still marked running, and this
+      // daemon cannot confirm or stop a process it never started.
+      throw recoveryIncompleteError(this.#recovery, 'pause_work_item', current.id);
+    }
     this.#stopping.add(workItemId);
     try {
       await this.#stop(workItemId, 'cancelled');
@@ -238,7 +297,12 @@ export class RunSupervisor implements RunControl {
         });
       }
     });
-    this.recover();
+    const recovery = this.recover();
+    if (recovery.state === 'incomplete') {
+      this.#deps.logger.error('could not record every stopped run before shutdown', {
+        remaining: recovery.remainingRunIds.length,
+      });
+    }
   }
 
   async #stop(workItemId: WorkItemId, reason: StopReason): Promise<void> {

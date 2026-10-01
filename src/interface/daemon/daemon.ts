@@ -98,10 +98,17 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         to: opened.migration.toVersion,
       });
     }
-    const interrupted = app.runs.recover();
-    if (interrupted.length > 0) {
+    const recovery = app.runs.recover();
+    if (recovery.recoveredRunIds.length > 0) {
       logger.warn('runs from a previous daemon were marked interrupted', {
-        count: interrupted.length,
+        count: recovery.recoveredRunIds.length,
+      });
+    }
+    if (recovery.state === 'incomplete') {
+      // Degraded start: inspection, controls, and cleanup stay available; writes are refused
+      // until a restart completes recovery (ADR 0009).
+      logger.error('startup recovery incomplete: database storage reserve exhausted', {
+        remaining: recovery.remainingRunIds.length,
       });
     }
     await app.storage.cleanupIfNeeded();

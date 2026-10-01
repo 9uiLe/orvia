@@ -343,8 +343,8 @@ function errcode(error: unknown): number | null {
 /**
  * Applies pending migrations without letting Orvia's files exceed the database budget at any
  * point. The capacity check runs before anything is written. Migrations run in
- * rollback-journal mode because, unlike WAL, its size is bounded by the database size; the
- * caller switches back to WAL afterwards.
+ * rollback-journal mode, the connection's normal mode, whose journal size is bounded by the
+ * database size.
  */
 export function applyMigrations(
   db: DatabaseSync,

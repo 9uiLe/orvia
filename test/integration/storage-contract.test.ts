@@ -400,6 +400,130 @@ describe('storage contract: database_max_mb is never exceeded', () => {
     assert.deepEqual([...statuses], ['interrupted']);
   });
 
+  async function createRunningRuns(d: Daemon, count: number): Promise<string[]> {
+    const store = d.app.deps.store;
+    const runIds: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const item = await call<{ id: `W-${number}` }>(d.app, 'create_work_item', {
+        planId: 'P-1',
+        title: `W ${i}`,
+      });
+      const run = store.transaction(() =>
+        store.runs.insert({
+          workItemId: item.id,
+          agent: 'fake',
+          outputRef: `runs/${i}.log`,
+          now: new Date().toISOString(),
+        }),
+      );
+      runIds.push(run.id);
+    }
+    return runIds;
+  }
+
+  /**
+   * Uses up the control reserve too, the way many control operations at HARD_LIMIT would, down
+   * to less than `granularity` bytes, so recovery can make some progress before it runs out.
+   */
+  function exhaustReserve(d: Daemon, granularity: number): void {
+    const store = d.app.deps.store;
+    for (let i = 0; i < 5000; i++) {
+      try {
+        store.transaction(
+          () =>
+            store.notes.insert({
+              planId: 'P-1',
+              workItemId: null,
+              kind: 'context',
+              body: 'r'.repeat(granularity),
+              now: new Date().toISOString(),
+            }),
+          'reserve',
+        );
+      } catch {
+        return;
+      }
+    }
+  }
+
+  interface RecoveryStatus {
+    runningRuns: number;
+    recovery: {
+      state: string;
+      recoveredRuns: number;
+      remainingRuns?: number;
+      reason?: string;
+      remediation?: string;
+    };
+  }
+
+  test('a startup recovery that runs out of reserve leaves a degraded but usable daemon', async () => {
+    const d0 = await start(8);
+    await call(d0.app, 'create_plan', { title: 'P' });
+    const runIds = await createRunningRuns(d0, 1000);
+    await fillToWriteCapacity(d0);
+    exhaustReserve(d0, 16 * KIB);
+    crash(d0);
+
+    const peak = await sampler();
+    const d = await start(8);
+    const status = await call<RecoveryStatus>(d.app, 'get_status');
+    assert.equal(status.recovery.state, 'incomplete');
+    assert.equal(status.recovery.reason, 'STORAGE_HARD_LIMIT');
+    const remaining = status.recovery.remainingRuns ?? 0;
+    assert.ok(remaining > 0);
+    assert.ok(status.recovery.recoveredRuns > 0, 'recovery made progress before running out');
+    assert.equal(status.recovery.recoveredRuns + remaining, runIds.length);
+    assert.equal(status.runningRuns, remaining, 'unrecovered runs stay running');
+    assert.match(status.recovery.remediation ?? '', /storage\.database_max_mb/);
+
+    // Inspection and maintenance work.
+    await call(d.app, 'get_storage_status');
+    await call(d.app, 'get_schema_status');
+    await call(d.app, 'list_plans');
+    await call(d.app, 'get_plan', { planId: 'P-1' });
+    const items = await call<{ id: string }[]>(d.app, 'list_work_items');
+    await call(d.app, 'get_work_item', { workItemId: items[0]?.id });
+    await call(d.app, 'run_storage_cleanup');
+
+    // New work is refused with the reason, and so is pausing an unrecovered run's Work Item.
+    const stillRunning = runIds.find(
+      (id) => d.app.deps.store.runs.get(id as `R-${number}`)?.status === 'running',
+    );
+    const owner = d.app.deps.store.runs.get(stillRunning as `R-${number}`)?.workItemId;
+    const refused = await rejectsWith(
+      call(d.app, 'start_run', { workItemId: owner, agent: 'fake', instructions: 'go' }),
+      'RECOVERY_INCOMPLETE',
+    );
+    assert.match(refused.message, /storage\.database_max_mb/);
+    await rejectsWith(call(d.app, 'create_plan', { title: 'new' }), 'RECOVERY_INCOMPLETE');
+    await rejectsWith(call(d.app, 'pause_work_item', { workItemId: owner }), 'RECOVERY_INCOMPLETE');
+    const observed = await peak.stop();
+    assert.ok(observed.total <= 8 * MIB, `peak ${observed.total}`);
+
+    // Remediation: a larger budget and a restart complete the recovery.
+    const recoveredBefore = new Map(
+      runIds
+        .map((id) => d.app.deps.store.runs.get(id as `R-${number}`))
+        .filter((run) => run?.status === 'interrupted')
+        .map((run) => [run?.id, run?.finishedAt]),
+    );
+    await d.close();
+    daemon = null;
+    const restarted = await start(16);
+    const after = await call<RecoveryStatus>(restarted.app, 'get_status');
+    assert.equal(after.recovery.state, 'complete');
+    assert.equal(after.runningRuns, 0);
+    for (const [id, finishedAt] of recoveredBefore) {
+      assert.equal(
+        restarted.app.deps.store.runs.get(id as `R-${number}`)?.finishedAt,
+        finishedAt,
+        'runs recovered earlier are not rewritten',
+      );
+    }
+    await call(restarted.app, 'create_plan', { title: 'writable again' });
+  });
+
   test('recovery that stopped halfway finishes on the next start', async () => {
     const d0 = await start(16);
     await call(d0.app, 'create_plan', { title: 'P' });
