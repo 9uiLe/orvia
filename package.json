@@ -29,7 +29,8 @@
     "bench": "node scripts/bench.ts",
     "orvia": "node src/interface/cli/main.ts",
     "check": "npm run typecheck && npm run lint && npm run deps:check && npm test && npm run build",
-    "deps:check": "node scripts/check-dependencies.ts"
+    "deps:check": "node scripts/check-dependencies.ts",
+    "bench:storage": "node scripts/bench-storage.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.2.0",
