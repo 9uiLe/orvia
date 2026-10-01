@@ -38,7 +38,8 @@ counts.
 }
 ```
 
-`database_max_mb` covers state.db, WAL, SHM, and migration backups. `cache_max_mb` covers
+`database_max_mb` covers state.db, WAL, SHM, the rollback journal used during migrations, and
+migration backups. `cache_max_mb` covers
 everything under the cache directory. `retention_days` applies to cache entries and migration
 backups. Cleanup starts at `pressure_percent`, and status reports `WARNING` at `warning_percent`.
 
@@ -69,13 +70,13 @@ reserve because relieving it only deletes files.
 
 At `HARD_LIMIT`:
 
-| Operation class                                            | Database at HARD_LIMIT | Cache at HARD_LIMIT |
-| ---------------------------------------------------------- | ---------------------- | ------------------- |
-| read (status, storage status, lists)                       | allowed                | allowed             |
-| control (pause, resume)                                    | allowed                | allowed             |
-| maintenance (cleanup, archive)                             | allowed                | allowed             |
-| write (create, update, context, decisions, feedback, bind) | refused                | allowed             |
-| agent_run (`start_run`)                                    | refused                | refused             |
+| Operation class                                             | Database at HARD_LIMIT | Cache at HARD_LIMIT |
+| ----------------------------------------------------------- | ---------------------- | ------------------- |
+| read (status, storage status, lists)                        | allowed                | allowed             |
+| control (pause, resume)                                     | allowed                | allowed             |
+| maintenance (cleanup; archive, which frees almost no space) | allowed                | allowed             |
+| write (create, update, context, decisions, feedback, bind)  | refused                | allowed             |
+| agent_run (`start_run`)                                     | refused                | refused             |
 
 Beyond the gate, SQLite's `max_page_count` stops the main database file at `database_max_mb`,
 and the cache writer stops writing (marking output `truncated`) when the shared cache budget is
@@ -106,7 +107,14 @@ branches or worktrees), if ever added, will be a separate, explicit feature.
 
 ## Consequences
 
-- Durable data alone can reach `HARD_LIMIT`; then the user must archive data (a future export
-  or delete feature) or raise `database_max_mb`.
+- **Durable data alone can reach `HARD_LIMIT`, and today the only remedy is raising
+  `database_max_mb`.** Cleanup never deletes durable data. Archiving a Plan or Work Item only
+  changes its status and frees almost no space; it is allowed at `HARD_LIMIT` so that work can be
+  wound down, not to reclaim storage. A future milestone adds explicit recovery paths:
+  export (durable data to a file the user owns), explicit delete of archived Plans and Work
+  Items, and database compaction (`VACUUM`) as a maintenance command.
+- Migrations need room for the database, a rollback journal, and a backup at the same time
+  ([ADR 0002](0002-sqlite.md)). If that does not fit, the daemon refuses to start with
+  `MIGRATION_STORAGE_REQUIRED` instead of exceeding the limit.
 - Orvia's own logs go to stderr; persisting and rotating them belongs to the process supervisor
   (launchd, systemd, a terminal).

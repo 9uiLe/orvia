@@ -27,15 +27,27 @@ state outside the agents and outside your repositories, and makes it explicit.
 Agents proceed without asking for approval on every step (that would be human-in-the-loop).
 The human stays able to act at any time:
 
-| Action                                      | How                                                             | Status                                                                                                                   |
-| ------------------------------------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| Observe                                     | `get_status`, `get_plan`, `get_work_item`, `get_run_output`     | Implemented                                                                                                              |
-| Pause / resume                              | `pause_work_item` (cancels a running agent), `resume_work_item` | Implemented                                                                                                              |
-| Add context                                 | `add_context` (Plan or Work Item)                               | Implemented                                                                                                              |
-| Redirect / reject / comment                 | `submit_feedback` with `kind`                                   | Implemented: recorded and included in the next agent prompt. It does not stop a running agent by itself; pause for that. |
-| Record or change a decision                 | `record_decision`, with `supersedesDecisionId` to change one    | Implemented                                                                                                              |
-| Rollback                                    | —                                                               | Not implemented (needs git changes; planned as an explicit feature)                                                      |
-| Escalation of design questions to the human | —                                                               | Planned                                                                                                                  |
+| Action                                      | How                                                          | Status                                                                                                                   |
+| ------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
+| Observe                                     | `get_status`, `get_plan`, `get_work_item`, `get_run_output`  | Implemented                                                                                                              |
+| Pause / resume                              | `pause_work_item`, `resume_work_item`                        | Implemented. Pause returns only after the agent and the processes it started have stopped (macOS/Linux; see below).      |
+| Add context                                 | `add_context` (Plan or Work Item)                            | Implemented                                                                                                              |
+| Redirect / reject / comment                 | `submit_feedback` with `kind`                                | Implemented: recorded and included in the next agent prompt. It does not stop a running agent by itself; pause for that. |
+| Record or change a decision                 | `record_decision`, with `supersedesDecisionId` to change one | Implemented                                                                                                              |
+| Rollback                                    | —                                                            | Not implemented (needs git changes; planned as an explicit feature)                                                      |
+| Escalation of design questions to the human | —                                                            | Planned                                                                                                                  |
+
+### What pause guarantees
+
+`pause_work_item` succeeds only after the Work Item's agent **and every process it started that
+stayed in its process group** have exited, the run is recorded as `cancelled`, and the Work Item
+is `paused`. Orvia sends `SIGTERM` to the group, waits `agents.termination_grace_ms` (10 s by
+default), then sends `SIGKILL` and waits up to `agents.kill_confirmation_ms` (5 s). If the
+processes still cannot be confirmed gone, pause fails with `AGENT_TERMINATION_FAILED` and the Work
+Item stays `active`. It is never shown as paused while its agent may be running. This holds on
+macOS and Linux. Processes that leave the group (`setsid`, daemonizing tools) are not covered.
+On Windows only the agent process itself is stopped. Details:
+[ADR 0008](docs/adr/0008-agent-process-lifecycle.md).
 
 ## Plans and Work Items
 
@@ -223,6 +235,18 @@ reports the result.
 
 Large text (agent output, diffs, source, prompts) is never stored in SQLite. Storage cleanup
 never touches git repositories, worktrees, branches, or commits; this is tested.
+
+**Migrations stay within the limit.** Before a schema migration Orvia checks that the database,
+a rollback journal, a backup, existing backups, and the maintenance reserve all fit in
+`database_max_mb`. If they do not, the daemon refuses to start with
+`MIGRATION_STORAGE_REQUIRED` and changes nothing. The error says how many bytes are needed. In
+practice a migration needs about three times the database size within the budget.
+
+**When durable data fills the budget.** Cleanup only removes run records, cache, and expired
+backups; it never deletes Plans, Work Items, decisions, or notes. Archiving changes a status and
+frees almost no space. If durable data alone reaches `HARD_LIMIT`, the only remedy today is to
+raise `storage.database_max_mb`. Export, explicit deletion of archived data, and a compaction
+command are planned.
 Details: [ADR 0004](docs/adr/0004-storage-policy.md).
 
 ## Storage configuration
@@ -242,32 +266,38 @@ Details: [ADR 0004](docs/adr/0004-storage-policy.md).
     "warning_percent": 90
   },
   "agents": {
+    "termination_grace_ms": 10000,
+    "kill_confirmation_ms": 5000,
     "codex": { "command": "codex" },
     "claude": { "command": "claude" }
   }
 }
 ```
 
-| Key                                        | Meaning                                      |
-| ------------------------------------------ | -------------------------------------------- |
-| `log_level`                                | `error`, `warn`, `info`, `debug`, or `trace` |
-| `storage.database_max_mb`                  | state.db + WAL + SHM + migration backups     |
-| `storage.cache_max_mb`                     | agent output cache                           |
-| `storage.retention_days`                   | cache entries and migration backups          |
-| `storage.max_completed_runs_per_work_item` | finished run records kept per Work Item      |
-| `storage.pressure_percent`                 | cleanup starts                               |
-| `storage.warning_percent`                  | status reports `WARNING`                     |
-| `agents.<name>.command`                    | executable name on `PATH`, or a path         |
+| Key                                        | Meaning                                                             |
+| ------------------------------------------ | ------------------------------------------------------------------- |
+| `log_level`                                | `error`, `warn`, `info`, `debug`, or `trace`                        |
+| `storage.database_max_mb`                  | state.db + WAL + SHM + migration journal + migration backups        |
+| `storage.cache_max_mb`                     | agent output cache                                                  |
+| `storage.retention_days`                   | cache entries and migration backups                                 |
+| `storage.max_completed_runs_per_work_item` | finished run records kept per Work Item                             |
+| `storage.pressure_percent`                 | cleanup starts                                                      |
+| `storage.warning_percent`                  | status reports `WARNING`                                            |
+| `agents.<name>.command`                    | executable name on `PATH`, or a path                                |
+| `agents.termination_grace_ms`              | time between `SIGTERM` and `SIGKILL` when stopping an agent         |
+| `agents.kill_confirmation_ms`              | how long to wait for the process group to disappear after `SIGKILL` |
 
 JSON instead of TOML keeps the runtime free of a parser dependency
 ([ADR 0007](docs/adr/0007-external-dependencies.md)).
-The size defaults come from the project brief and the thresholds were set by the maintainer.
+The size defaults come from the project brief; the thresholds and termination timeouts were set
+by the maintainer.
 They are starting points to revisit with real usage data, not measured optima. Invalid values
 stop the daemon with `CONFIG_INVALID`.
 
 Pressure levels: `NORMAL` → `PRESSURE` (cleanup starts) → `WARNING` → `HARD_LIMIT` (limit minus
 a maintenance reserve of one WAL checkpoint interval). At `HARD_LIMIT`, status, storage status,
-pause/resume, cleanup, and archive keep working; new writes and agent runs are refused.
+pause/resume, cleanup, and archive keep working; new writes and agent runs are refused. Archive
+is allowed so work can be wound down; it does not free space.
 
 ## Security model
 
@@ -279,22 +309,29 @@ What Orvia does:
 - Validates a Work Item's repository, worktree, and branch identity immediately before starting
   an agent, and refuses on any mismatch. The agent's working directory comes from the Work Item,
   never from the agent.
+- Runs each agent in its own process group (macOS/Linux) and, on pause or shutdown, stops the
+  whole group and confirms it is gone before reporting success.
 - Passes prompts to agents on stdin, not on the command line.
 - Stores no credentials and sends no telemetry. Logs contain ids and counts, not prompts, agent
   output, or file contents.
 
 What Orvia does **not** guarantee:
 
-- **No Orvia-enforced filesystem sandbox.** Agents run with your user's permissions. Orvia
-  computes a filesystem policy (worktree root plus its git directories) and passes it to each
-  agent's own mechanism: Codex's `workspace-write` sandbox, and Claude Code's permission
-  settings (not an OS sandbox). How well that holds depends on the agent.
+- **No Orvia-enforced filesystem sandbox.** Orvia does not prevent an agent from writing
+  outside its worktree, including into other worktrees. Agents run with your user's permissions.
+  What Orvia offers is workspace identity validation before launch, plus a filesystem policy
+  (worktree root and its git directories) passed to each agent's own mechanism: Codex's
+  `workspace-write` sandbox, and Claude Code's permission settings (not an OS sandbox). How well
+  that holds depends on the agent.
 - Workspace identity is checked immediately before launch, not continuously. An agent or a
   person can still change branches or files afterwards.
 - `get_run_output` returns agent output to whichever client asks for it, including ChatGPT.
   Agent output can contain your source code.
 - MCP clients and ChatGPT are subject to prompt injection from content they read. Write tools
   require ChatGPT's confirmation, but review what you approve.
+- Process-tree stopping does not cover descendants that leave the agent's process group, agents
+  still running after the daemon was killed by the OS, or Windows (only the agent process is
+  stopped there).
 - Windows has not been tested.
 
 Report vulnerabilities privately: [SECURITY.md](SECURITY.md).
@@ -315,8 +352,10 @@ because shared runners vary too much for a fixed threshold to mean anything.
 3. Git operations as explicit features: worktree creation, PR mapping from the GitHub CLI,
    rollback.
 4. Orvia-enforced filesystem sandbox at the process launch boundary.
-5. MCP over Streamable HTTP with authentication; verified ChatGPT setup guide.
-6. Distribution ([docs/releasing.md](docs/releasing.md)) and service units for launchd and
+5. Recovery when durable data fills the budget: export, explicit deletion of archived data,
+   and a database compaction command.
+6. MCP over Streamable HTTP with authentication; verified ChatGPT setup guide.
+7. Distribution ([docs/releasing.md](docs/releasing.md)) and service units for launchd and
    systemd.
 
 ## Contributing

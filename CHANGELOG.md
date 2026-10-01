@@ -20,4 +20,14 @@ Before 1.0.0, minor versions may contain breaking changes.
 - Configurable storage limits with pressure levels, automatic cleanup, and `HARD_LIMIT` gating.
 - `orvia` CLI, local IPC socket, and an MCP server over stdio.
 - JSON configuration (`config.json`) validated at startup.
+
+### Fixed
+
+- Migrations no longer exceed `storage.database_max_mb`: a preflight refuses them with
+  `MIGRATION_STORAGE_REQUIRED` when the database, rollback journal, and backup would not fit, and
+  a migration that outgrows the budget is rolled back.
+- `pause_work_item` now stops the agent's whole process group (macOS/Linux), escalating from
+  `SIGTERM` to `SIGKILL`, and returns only after it is gone; it fails with
+  `AGENT_TERMINATION_FAILED` instead of reporting a paused Work Item whose agent still runs.
+  Daemon shutdown uses the same procedure.
 - `AgentAdapter` abstraction with experimental Codex and Claude Code adapters.

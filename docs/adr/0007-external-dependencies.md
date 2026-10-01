@@ -90,12 +90,12 @@ script or native code. `npm audit`: 0 vulnerabilities.
 
 ### Development-only
 
-| Package                                     | Why                                                               | Notes                                                                                    |
-| ------------------------------------------- | ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `typescript`, `@types/node`                 | typecheck and build                                               | `@types/node` major is held to the Node.js major in `flake.nix` (Dependabot ignore rule) |
-| `eslint`, `@eslint/js`, `typescript-eslint` | lint, layer-boundary rules                                        | largest dev subtree (about 70 packages)                                                  |
-| `prettier`                                  | formatting                                                        | no dependencies                                                                          |
-| `@modelcontextprotocol/client`              | test the server with the official client for the current protocol | 13 packages, test only                                                                   |
+| Package                                     | Why                                                               | Notes                                                                                                                                                         |
+| ------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `typescript`, `@types/node`                 | typecheck and build                                               | majors are upgraded by hand: `@types/node` with the Node.js major in `flake.nix`, `typescript` once `typescript-eslint` supports it (Dependabot ignore rules) |
+| `eslint`, `@eslint/js`, `typescript-eslint` | lint, layer-boundary rules                                        | largest dev subtree (about 70 packages)                                                                                                                       |
+| `prettier`                                  | formatting                                                        | no dependencies                                                                                                                                               |
+| `@modelcontextprotocol/client`              | test the server with the official client for the current protocol | 13 packages, test only                                                                                                                                        |
 
 None of them ship in `dist/` or install with Orvia.
 
@@ -118,6 +118,10 @@ None of them ship in `dist/` or install with Orvia.
   update, with a 7-day cooldown. Security updates arrive as separate PRs. Nothing is
   auto-merged. Major updates of runtime dependencies need human review of the changelog,
   migration notes, and behavior.
+- Dependabot `ignore` rules also suppress security-update PRs for the versions they match.
+  They are therefore limited to majors of development-only tools (`typescript`,
+  `@types/node`), which never ship in `dist/`. Their minor and patch updates, every runtime
+  dependency, and Dependabot alerts are not affected.
 - For a critical or high advisory, decide and record in the PR or issue:
   1. which package and version range is affected (`npm ls <package>`);
   2. whether Orvia's use is exploitable (e.g. HTTP-transport advisories against the stdio-only
