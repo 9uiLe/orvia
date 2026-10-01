@@ -68,7 +68,7 @@ the pages that pausing, recording a run's result, cleanup, or archiving can add,
 b-tree depth ([ADR 0009](0009-storage-contract.md)). The cache needs no reserve because relieving
 it only deletes files.
 
-At `HARD_LIMIT`:
+Admission at `HARD_LIMIT` (the pre-operation gate):
 
 | Operation class                                             | Database at HARD_LIMIT | Cache at HARD_LIMIT |
 | ----------------------------------------------------------- | ---------------------- | ------------------- |
@@ -77,6 +77,10 @@ At `HARD_LIMIT`:
 | maintenance (cleanup; archive, which frees almost no space) | allowed                | allowed             |
 | write (create, update, context, decisions, feedback, bind)  | refused                | allowed             |
 | agent_run (`start_run`)                                     | refused                | refused             |
+
+Allowed classes are not refused by the gate, but their transactions can still fail once the
+shared reserve is used up ([ADR 0009](0009-storage-contract.md)). If that happens during startup
+recovery, the daemon starts degraded instead of failing.
 
 The pre-write check uses the last measurement. Every transaction is additionally capped by
 SQLite's `max_page_count`, so a write that would not fit fails with `STORAGE_HARD_LIMIT` and is

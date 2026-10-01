@@ -126,11 +126,44 @@ Every transaction that may use the reserve changes one row, so its growth fits t
 The reserve is one pool, not a per-transaction allowance: each reserve transaction may grow the
 database up to `maxPages`, so control operations performed while writes are refused draw on the
 same pages, and their total growth is the same whether rows are changed one per transaction or
-many at once. One row per transaction keeps each transaction within the per-row derivation,
-keeps its journal and in-memory dirty pages small, and makes recovery and pruning restartable:
-if the reserve runs out partway, the runs already handled stay committed and the rest are
-handled on the next attempt. For scale, recording a run as interrupted adds about 30 bytes; a
-test recovers 1,000 runs on a database already at its write capacity.
+many at once. Pages a reserve transaction adds stay after its commit, so the reserve can be used
+up; then SQLite refuses the next reserve transaction with `SQLITE_FULL` (→ `STORAGE_HARD_LIMIT`).
+The pre-operation gate never refuses control and maintenance operations, but that does not mean
+their transactions always succeed.
+
+One row per transaction keeps each transaction within the per-row derivation and keeps its
+journal and in-memory dirty pages small. It also makes recovery and pruning restartable in this
+sense only: if they stop partway, the runs already handled stay committed, and the next attempt
+handles only the runs that remain. A restart does not create reserve. If the reserve is used up,
+the next attempt fails at the same point until cleanup frees pages or `storage.database_max_mb`
+is raised. For scale, recording a run as interrupted adds about 30 bytes. A test recovers 1,000
+runs on a database already at its write capacity.
+
+### Degraded start when recovery runs out of reserve
+
+Startup recovery stops at the first `STORAGE_HARD_LIMIT` instead of failing startup. The
+remaining runs stay `running`, and the daemon starts with recovery **incomplete**. This state is
+held in memory and rebuilt on every start from the runs still `running`.
+
+- Available: every read (`get_status`, `get_storage_status`, `get_schema_status`, Plans, Work
+  Items, runs), `run_storage_cleanup`, archive, and resume. `get_status.recovery` reports
+  `incomplete`, the recovered and remaining counts, the reason, and the remediation. `orvia
+doctor` shows it as a warning.
+- Refused with `RECOVERY_INCOMPLETE`: `start_run` and every other write. Pausing a Work Item whose
+  run is one of the unrecovered records is also refused. The current daemon never started that
+  process, so it cannot stop it or confirm that it stopped, and a paused Work Item next to a run
+  marked running would mislead.
+- Remediation: run `orvia cleanup` (it helps only if old run records or expired backups take
+  space; durable data is never deleted), or raise `storage.database_max_mb`, then restart. The
+  next start recovers the remaining runs and leaves those already recovered untouched.
+
+Only `STORAGE_HARD_LIMIT` leads to a degraded start. Integrity failures, checksum mismatches,
+unsupported schema versions, an invalid migration chain, and a database owned by another
+process still stop startup.
+
+These are separate properties: the **hard storage bound** always holds; **admission gating**
+refuses writes at `HARD_LIMIT`; a **reserve transaction** succeeds while reserve remains;
+**recovery** may be incomplete; and the **daemon** stays available for diagnosis either way.
 
 A consequence: data can use about half of what remains after backups. The other half is the
 worst-case journal.

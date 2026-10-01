@@ -311,9 +311,16 @@ stop the daemon with `CONFIG_INVALID`.
 Pressure levels: `NORMAL` → `PRESSURE` (cleanup starts) → `WARNING` → `HARD_LIMIT`. For the
 database they compare the data size with its write capacity (`get_storage_status` reports
 `dataBytes` and `writeCapacityBytes`); for the cache, the cache size with `cache_max_mb`. At
-`HARD_LIMIT`, status, storage status, pause/resume, cleanup, and archive keep working (they may
-use a small reserve above the write capacity); new writes and agent runs are refused. Archive
-is allowed so work can be wound down; it does not free space.
+`HARD_LIMIT`, the gate still admits status, storage status, pause/resume, cleanup, and archive.
+They use a small shared reserve above the write capacity, so they work until that reserve is
+used up. New writes and agent runs are refused. Archive is allowed so work can be wound down; it
+does not free space.
+
+**Degraded start.** If marking the previous daemon's unfinished runs as interrupted runs out of
+that reserve at startup, the daemon still starts. `orvia status` then reports `recovery` as
+`incomplete`, with counts and the fix. Reads, `orvia storage`, and `orvia cleanup` work. New
+work is refused with `RECOVERY_INCOMPLETE` until you run cleanup or raise
+`storage.database_max_mb` and restart.
 
 ## Security model
 
