@@ -27,6 +27,8 @@ describe('configuration', () => {
       warning_percent: 90,
     });
     assert.equal(config.log_level, 'info');
+    assert.equal(config.agents.termination_grace_ms, 10_000);
+    assert.equal(config.agents.kill_confirmation_ms, 5_000);
   });
 
   test('invalid values are rejected', () => {

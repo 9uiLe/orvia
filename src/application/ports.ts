@@ -199,11 +199,21 @@ export interface ProcessExit {
   readonly exitCode: number | null;
   readonly signal: string | null;
   readonly spawnError: string | null;
+  /** Set when processes the agent left behind could not be confirmed stopped. */
+  readonly leftoverError: string | null;
 }
 
+/**
+ * An agent and every process it started. `exited` resolves once the agent has exited and its
+ * remaining descendants have been stopped.
+ */
 export interface RunningProcess {
   readonly exited: Promise<ProcessExit>;
-  cancel(): void;
+  /**
+   * Stops the whole process tree and resolves only after it is confirmed gone.
+   * Rejects with AGENT_TERMINATION_FAILED otherwise.
+   */
+  terminate(): Promise<void>;
 }
 
 export interface ProcessLauncher {

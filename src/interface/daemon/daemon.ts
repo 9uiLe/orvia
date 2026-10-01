@@ -76,7 +76,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       cache: new FileCache(paths.cacheDir, limits.cacheMaxBytes),
       git: new GitWorkspaceInspector(new GitCli()),
       agents: new Map(agents.map((adapter) => [adapter.name, adapter])),
-      launcher: options.launcher ?? new NodeProcessLauncher(),
+      launcher:
+        options.launcher ??
+        new NodeProcessLauncher({
+          graceMs: config.agents.termination_grace_ms,
+          killConfirmationMs: config.agents.kill_confirmation_ms,
+        }),
       clock,
       logger,
       limits,
@@ -103,7 +108,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       store,
       migration: opened.migration,
       close: async () => {
-        app.runs.shutdown();
+        // Stop accepting requests, stop every agent process tree and record the runs, and
+        // only then close the database.
         if (listening !== null) {
           await new Promise<void>((resolve) => {
             listening.close(() => {
@@ -112,6 +118,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
             listening.closeAllConnections();
           });
         }
+        await app.runs.shutdown();
         store.close();
         logger.info('orvia daemon stopped');
       },

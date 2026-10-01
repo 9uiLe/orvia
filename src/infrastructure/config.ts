@@ -12,7 +12,8 @@ const megabytes = z
 const agent = z.strictObject({ command: z.string().min(1) });
 
 // Defaults: storage sizes are the values proposed in the project brief, and the pressure
-// thresholds were chosen by the maintainer; see docs/adr/0004-storage-policy.md.
+// thresholds and agent termination timeouts were chosen by the maintainer; see
+// docs/adr/0004-storage-policy.md and docs/adr/0008-agent-process-lifecycle.md.
 const configSchema = z.strictObject({
   log_level: z.enum(LOG_LEVELS).default('info'),
   storage: z
@@ -28,7 +29,14 @@ const configSchema = z.strictObject({
       message: 'pressure_percent must be lower than warning_percent',
     })
     .prefault({}),
-  agents: z.strictObject({ codex: agent.optional(), claude: agent.optional() }).prefault({}),
+  agents: z
+    .strictObject({
+      termination_grace_ms: z.int().positive().default(10_000),
+      kill_confirmation_ms: z.int().positive().default(5_000),
+      codex: agent.optional(),
+      claude: agent.optional(),
+    })
+    .prefault({}),
 });
 
 export type OrviaConfig = z.output<typeof configSchema>;

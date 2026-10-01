@@ -14,6 +14,7 @@ import {
   discoverWorktrees,
   getWorkItem,
   listWorkItems,
+  pauseWorkItem,
   transition,
   updateWorkItem,
 } from './work-items.ts';
@@ -226,10 +227,11 @@ export const OPERATIONS: readonly Operation[] = [
   defineOperation({
     name: 'pause_work_item',
     title: 'Pause work item',
-    description: 'Pause a Work Item. A running agent is cancelled and no new run can start.',
+    description:
+      'Pause a Work Item. Returns after its running agent and every process the agent started have stopped; if they cannot be stopped, fails with AGENT_TERMINATION_FAILED and the Work Item stays active.',
     operationClass: 'control',
     input: z.object({ workItemId: id('workItem', 'Work Item id') }),
-    handler: (app, input) => transition(app.deps, app.runs, input, 'pause'),
+    handler: (app, input) => pauseWorkItem(app.deps, app.runs, input),
   }),
   defineOperation({
     name: 'resume_work_item',
@@ -237,7 +239,7 @@ export const OPERATIONS: readonly Operation[] = [
     description: 'Resume a paused Work Item so that runs can start again.',
     operationClass: 'control',
     input: z.object({ workItemId: id('workItem', 'Work Item id') }),
-    handler: (app, input) => transition(app.deps, app.runs, input, 'resume'),
+    handler: (app, input) => transition(app.deps, input, 'resume'),
   }),
   defineOperation({
     name: 'complete_work_item',
@@ -245,7 +247,7 @@ export const OPERATIONS: readonly Operation[] = [
     description: 'Mark a Work Item as completed. Fails while an agent is running.',
     operationClass: 'write',
     input: z.object({ workItemId: id('workItem', 'Work Item id') }),
-    handler: (app, input) => transition(app.deps, app.runs, input, 'complete'),
+    handler: (app, input) => transition(app.deps, input, 'complete'),
   }),
   defineOperation({
     name: 'archive_work_item',
@@ -253,7 +255,7 @@ export const OPERATIONS: readonly Operation[] = [
     description: 'Archive a Work Item. Archived data is kept. Fails while an agent is running.',
     operationClass: 'maintenance',
     input: z.object({ workItemId: id('workItem', 'Work Item id') }),
-    handler: (app, input) => transition(app.deps, app.runs, input, 'archive'),
+    handler: (app, input) => transition(app.deps, input, 'archive'),
   }),
   defineOperation({
     name: 'add_context',
