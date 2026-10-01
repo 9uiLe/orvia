@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# Workflows triggered by pull requests from forks get a read-only token and no secrets.
+# This workflow uses no secrets; keep it on `pull_request`, never `pull_request_target`.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  flake:
+    name: Nix flake check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+      - name: Evaluate the flake for every supported system
+        run: nix flake check --all-systems
+
+  check:
+    name: Check (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+      - name: Validate the development environment
+        run: nix develop --command sh -c 'node --version && npm --version && git --version && sqlite3 --version'
+      - name: Install dependencies
+        run: nix develop --command npm ci
+      - name: Typecheck
+        run: nix develop --command npm run typecheck
+      - name: Lint
+        run: nix develop --command npm run lint
+      - name: Unit tests
+        run: nix develop --command npm run test:unit
+      - name: Integration tests (worktree identity, storage quotas, migrations, query plans, daemon, CLI, MCP)
+        run: nix develop --command npm run test:integration
+      - name: Build
+        run: nix develop --command npm run build
+      - name: Smoke-test the built CLI
+        run: nix develop --command node dist/interface/cli/main.js doctor
