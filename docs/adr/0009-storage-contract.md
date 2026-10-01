@@ -110,6 +110,28 @@ budget`. The reserve between `writeMax` and `maxPages` holds the pages that one 
 b-tree can add: a split per level plus a new root, with depth at most log2(pages), and one
 pointer-map page.
 
+### Reserve transactions
+
+Every transaction that may use the reserve changes one row, so its growth fits the formula:
+
+| Operation                               | Rows changed per transaction                                |
+| --------------------------------------- | ----------------------------------------------------------- |
+| Startup recovery of runs left `running` | 1 run (one transaction per run)                             |
+| Recording a run's result                | 1 run                                                       |
+| Pause, resume, archive of a Work Item   | 1 Work Item                                                 |
+| Archive of a Plan                       | 1 Plan                                                      |
+| Cleanup: pruning old runs               | 1 run (one transaction per run)                             |
+| Cleanup: `incremental_vacuum`           | moves pages into free slots and shrinks the file; adds none |
+
+The reserve is one pool, not a per-transaction allowance: each reserve transaction may grow the
+database up to `maxPages`, so control operations performed while writes are refused draw on the
+same pages, and their total growth is the same whether rows are changed one per transaction or
+many at once. One row per transaction keeps each transaction within the per-row derivation,
+keeps its journal and in-memory dirty pages small, and makes recovery and pruning restartable:
+if the reserve runs out partway, the runs already handled stay committed and the rest are
+handled on the next attempt. For scale, recording a run as interrupted adds about 30 bytes; a
+test recovers 1,000 runs on a database already at its write capacity.
+
 A consequence: data can use about half of what remains after backups. The other half is the
 worst-case journal.
 
@@ -135,6 +157,35 @@ remedy (cleanup, or raise `storage.database_max_mb`).
    size) added to the other files. The result must fit within `writeMax`, so the reserve remains
    afterwards. Otherwise startup fails with `MIGRATION_STORAGE_REQUIRED` before anything is
    written. While migrating, `max_page_count` is `maxPages`.
+4. A migration can add tables and indexes, and the reserve grows with the number of b-trees.
+   So after each migration's SQL runs, and before its COMMIT, the capacity is recomputed from
+   the schema SQLite now has (`sqlite_schema` entries with a root page, the same count the store
+   uses), the measured backups, and the new page count. If the page count exceeds the new
+   `writeMax`, the migration is rolled back with `MIGRATION_STORAGE_REQUIRED`. The error gives
+   the post-migration page and b-tree counts, both page caps, and the additional bytes needed.
+   Each migration commits on its own, so earlier migrations in the chain stay applied, as they
+   always have.
+
+The store counts b-trees once and caches the count. That is correct only because the schema
+changes nowhere but in migrations, which finish before the store is created. A future runtime
+schema change would have to refresh it.
+
+## SQLite compatibility
+
+Parts of this contract depend on SQLite's implementation rather than its documented interface:
+
+- the 64 KiB journal-header bound (`MAX_SECTOR_SIZE`);
+- the journal kept in exclusive locking mode and truncated by `journal_size_limit = 0`;
+- rewriting the same application id producing a commit, which truncates a leftover journal;
+- `temp_store = MEMORY` keeping sort and statement data off disk.
+
+SQLite comes from Node.js (`nodejs_24` in `flake.nix`). Any change of Node.js or of the nixpkgs
+input can change it, and must pass CI, whose integration suite includes the tests that check
+these assumptions: `storage-contract.test.ts` (budget during writes, WAL conversion, crash
+recovery including a near-limit crash, the journal-bound measurement, the temporary-file
+watch), `migrations.test.ts` (preflight, runtime cap, post-migration reserve), and
+`process-lifecycle.test.ts`. Run `npm run bench:storage` as well and compare it with
+`docs/benchmarks/` before merging such an update.
 
 ## Consequences
 

@@ -80,6 +80,11 @@ script or native code. `npm audit`: 0 vulnerabilities.
 
 ### node:sqlite, built-in (release candidate)
 
+- **Compatibility gate:** the storage contract relies on SQLite implementation details
+  ([ADR 0009](0009-storage-contract.md#sqlite-compatibility)). Updating Node.js, and with it
+  SQLite, requires the storage-contract, migration, and crash-recovery integration tests to pass
+  in CI, plus a `npm run bench:storage` comparison.
+
 - **Stability:** 1.2 (release candidate) since Node.js 24.15.0, which is the `engines` minimum.
   No flag is needed.
 - **Why not a package:** `better-sqlite3` is a native addon. It needs a compiler or prebuilt

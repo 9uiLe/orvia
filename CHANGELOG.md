@@ -35,6 +35,10 @@ Before 1.0.0, minor versions may contain breaking changes.
   so that the database, its worst-case journal, and backups fit. Writes that would not fit fail
   with `STORAGE_HARD_LIMIT` and are rolled back. A database left in WAL mode is converted at
   startup only if the conversion peak fits. SQLite temporary data is kept in memory.
+- Control and maintenance transactions that may use the storage reserve change one row each:
+  startup recovery and run pruning now commit one run per transaction (restartable). After each
+  migration, the reserve is re-checked against the actual schema before COMMIT, and a migration
+  that leaves no reserve is rolled back with `MIGRATION_STORAGE_REQUIRED`.
 
 ### Changed
 
