@@ -48,9 +48,10 @@ export interface StorageAssessment {
 }
 
 /**
- * The largest rollback-journal header SQLite writes: one sector, and SQLite caps the sector
- * size at 64 KiB. With cache spilling disabled the journal is synced once, at commit, so a
- * transaction's journal has a single header.
+ * An upper bound for one rollback-journal header. The SQLite documentation says the header is
+ * padded to the sector size; the 64 KiB ceiling is SQLite's MAX_SECTOR_SIZE in pager.c. With
+ * cache spilling disabled the journal is synced once, at commit, so it has a single header.
+ * test/integration/storage-contract.test.ts measures a full-rewrite journal against this bound.
  */
 export const JOURNAL_HEADER_BYTES = 65_536;
 /** Per journaled page: a 4-byte page number and a 4-byte checksum around the page content. */

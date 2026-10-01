@@ -100,8 +100,9 @@ writeMax  = maxPages − btrees × (⌈log2 maxPages⌉ + 1) − 1
 ```
 
 `otherFiles` is the backups plus any leftover WAL, SHM, or journal, measured before every
-transaction. 64 KiB is the largest sector, and therefore the largest journal header, that SQLite
-writes. Before every transaction the store checks `page_count ≤ maxPages` and sets
+transaction. 64 KiB bounds the journal header. The documentation says only that the header is
+padded to the sector size; the 64 KiB ceiling is `MAX_SECTOR_SIZE` in SQLite's source
+(`pager.c`). A test measures the journal of a full rewrite against the bound. Before every transaction the store checks `page_count ≤ maxPages` and sets
 `max_page_count` to `writeMax` for ordinary writes, or to `maxPages` for control and maintenance
 (pause, recording a run's result, startup recovery, cleanup, archive, resume). The worst case of
 any transaction is then `maxPages × page_size + maxPages × (page_size + 8) + header + otherFiles ≤
@@ -125,8 +126,11 @@ remedy (cleanup, or raise `storage.database_max_mb`).
    change the files. If it does not fit, startup fails with `STORAGE_HARD_LIMIT` and the files
    are untouched.
 2. Opening rolls back a hot journal left by a crash. That restores original pages and truncates
-   to the original size, so recovery never grows storage. The leftover journal is counted and is
-   truncated by the next commit.
+   to the original size, so recovery never grows storage. In exclusive locking mode the journal
+   file then keeps its size until a commit. Near the limit it could block every transaction,
+   including that commit, so startup rewrites the (verified) application id. That is a one-page
+   commit reusing the journal from its start, after which `journal_size_limit = 0` truncates the
+   journal. An empty `BEGIN`/`COMMIT` does not truncate it, because it writes nothing.
 3. Migrations use the same capacity model, with the new backup estimate (pages in use × page
    size) added to the other files. The result must fit within `writeMax`, so the reserve remains
    afterwards. Otherwise startup fails with `MIGRATION_STORAGE_REQUIRED` before anything is

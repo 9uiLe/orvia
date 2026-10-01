@@ -7,6 +7,7 @@ import {
   assertCompatible,
   initializeFreshDatabase,
   latestVersion,
+  ORVIA_APPLICATION_ID,
   readHeader,
   validateMigrationList,
   type Migration,
@@ -85,6 +86,19 @@ function configureConnection(db: DatabaseSync): void {
 }
 
 /**
+ * After a crash, opening rolls the hot journal back, but in exclusive locking mode the journal
+ * file stays at full size until the next commit, and it counts against the budget. Near the
+ * limit that could block every later transaction, including the commit that would truncate it.
+ * Rewriting the application id (already verified to be Orvia's) is a one-page commit that
+ * reuses the journal from its start, so it never grows storage, and journal_size_limit = 0 then
+ * truncates the journal. An empty BEGIN/COMMIT does not: it writes nothing.
+ */
+function truncateLeftoverJournal(db: DatabaseSync, options: OpenDatabaseOptions): void {
+  if (measureDatabaseFiles(options.path, options.backupDir).journalBytes === 0) return;
+  db.exec(`PRAGMA application_id = ${ORVIA_APPLICATION_ID}`);
+}
+
+/**
  * A database left in WAL mode (by an earlier Orvia build, or a crash of one) is converted to
  * rollback-journal mode, which folds the WAL into the main file while both still exist. Each
  * WAL frame carries one page, so the main file can grow by at most the WAL's size: the peak is
@@ -132,6 +146,7 @@ export function openDatabase(options: OpenDatabaseOptions): OpenedDatabase {
     assertCompatible(header, latestVersion(options.migrations));
     configureConnection(db);
     if (header.pageCount === 0) initializeFreshDatabase(db);
+    else truncateLeftoverJournal(db, options);
     if (pragmaValue(db, 'journal_mode = DELETE') !== 'delete') {
       throw new OrviaError('INTERNAL', 'could not select rollback-journal mode');
     }

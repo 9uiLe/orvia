@@ -289,10 +289,57 @@ describe('storage contract: database_max_mb is never exceeded', () => {
       [['committed', '']],
       'the uncommitted transaction was rolled back',
     );
-    // In exclusive locking mode the rolled-back journal stays until the next commit; it is
-    // counted in the budget and truncated by that commit.
-    await call(d.app, 'create_plan', { title: 'after recovery' });
     assert.equal(measureDatabaseFiles(env.paths.databaseFile, env.paths.backupDir).journalBytes, 0);
+    await call(d.app, 'create_plan', { title: 'after recovery' });
+  });
+
+  test('a crash near the limit leaves the database writable and cleanable', async () => {
+    const d0 = await start(5);
+    await call(d0.app, 'create_plan', { title: 'P' });
+    await fillUntilRefused(d0, 64 * KIB);
+    await d0.close();
+    daemon = null;
+
+    // Rewrite every page, then die: the hot journal is about as large as the database.
+    const child = spawn(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        `const { openDatabase } = await import(${JSON.stringify(new URL('../../src/infrastructure/sqlite/database.ts', import.meta.url).href)});
+         const { MIGRATIONS } = await import(${JSON.stringify(new URL('../../src/infrastructure/sqlite/migrations/index.ts', import.meta.url).href)});
+         const { db } = openDatabase({ path: process.argv[1], backupDir: process.argv[2], migrations: MIGRATIONS, now: () => new Date(), databaseMaxBytes: 5 * 1024 * 1024 });
+         db.exec('BEGIN IMMEDIATE');
+         db.exec('UPDATE notes SET body = upper(body)');
+         process.stdout.write('in transaction');
+         setInterval(() => {}, 1000);`,
+        env.paths.databaseFile,
+        env.paths.backupDir,
+      ],
+      { stdio: ['ignore', 'pipe', 'inherit'] },
+    );
+    let output = '';
+    child.stdout.on('data', (chunk: Buffer) => (output += chunk.toString()));
+    for (let i = 0; i < 500 && !output.includes('in transaction'); i++) await sleep(10);
+    const exited = new Promise((resolve) => child.once('exit', resolve));
+    child.kill('SIGKILL');
+    await exited;
+    assert.ok(
+      measureDatabaseFiles(env.paths.databaseFile, env.paths.backupDir).journalBytes > MIB,
+      'a large hot journal was left behind',
+    );
+
+    const peak = await sampler();
+    const d = await start(5);
+    assert.equal(
+      measureDatabaseFiles(env.paths.databaseFile, env.paths.backupDir).journalBytes,
+      0,
+      'startup truncated the rolled-back journal',
+    );
+    await call(d.app, 'run_storage_cleanup');
+    await call(d.app, 'add_context', { planId: 'P-1', body: 'still writable' });
+    const observed = await peak.stop();
+    assert.ok(observed.total <= 5 * MIB, `peak ${observed.total}`);
   });
 
   test('sorting and multi-row changes create no files in the OS temporary directory', async () => {
