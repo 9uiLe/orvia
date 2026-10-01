@@ -1,0 +1,48 @@
+{
+  "name": "orvia",
+  "version": "0.0.0",
+  "description": "The human control plane for coding agents.",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/9uiLe/orvia.git"
+  },
+  "engines": {
+    "node": ">=24.15.0"
+  },
+  "bin": {
+    "orvia": "dist/interface/cli/main.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "lint": "eslint . && prettier --check .",
+    "format": "prettier --write .",
+    "test": "node --test \"test/**/*.test.ts\"",
+    "test:unit": "node --test \"test/unit/**/*.test.ts\"",
+    "test:integration": "node --test \"test/integration/**/*.test.ts\"",
+    "bench": "node scripts/bench.ts",
+    "orvia": "node src/interface/cli/main.ts",
+    "check": "npm run typecheck && npm run lint && npm test && npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.2.0",
+    "smol-toml": "1.9.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@modelcontextprotocol/client": "2.2.0",
+    "@modelcontextprotocol/sdk": "1.31.0",
+    "@types/node": "24.19.0",
+    "eslint": "10.11.0",
+    "prettier": "3.9.9",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.71.0"
+  }
+}
