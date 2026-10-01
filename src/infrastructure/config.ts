@@ -77,20 +77,11 @@ export function databaseBudgetBytes(config: OrviaConfig): number {
   return config.storage.database_max_mb * MIB;
 }
 
-export function storageLimits(config: OrviaConfig, databaseReserveBytes: number): StorageLimits {
+export function storageLimits(config: OrviaConfig): StorageLimits {
   const s = config.storage;
-  const databaseMaxBytes = databaseBudgetBytes(config);
-  if (databaseMaxBytes <= databaseReserveBytes) {
-    throw new OrviaError(
-      'CONFIG_INVALID',
-      `storage.database_max_mb must exceed the ${Math.ceil(databaseReserveBytes / MIB)} MiB maintenance reserve`,
-      { databaseReserveBytes },
-    );
-  }
   return {
-    databaseMaxBytes,
+    databaseMaxBytes: databaseBudgetBytes(config),
     cacheMaxBytes: s.cache_max_mb * MIB,
-    databaseReserveBytes,
     pressurePercent: s.pressure_percent,
     warningPercent: s.warning_percent,
     retentionDays: s.retention_days,

@@ -40,7 +40,11 @@ export class RunSupervisor implements RunControl {
   /** Marks runs left `running` by a previous daemon process as interrupted. */
   recover(): RunId[] {
     const { store } = this.#deps;
-    return store.transaction(() => store.runs.markAllRunningInterrupted(nowIso(this.#deps)));
+    if (store.runs.listRunning().length === 0) return [];
+    return store.transaction(
+      () => store.runs.markAllRunningInterrupted(nowIso(this.#deps)),
+      'reserve',
+    );
   }
 
   async start(input: {
@@ -137,14 +141,16 @@ export class RunSupervisor implements RunControl {
         const status =
           active.stopReason ??
           (exit.exitCode === 0 && exit.leftoverError === null ? 'succeeded' : 'failed');
-        deps.store.transaction(() =>
-          deps.store.runs.finish(run.id, {
-            status,
-            exitCode: exit.exitCode,
-            outputBytes: output.bytes,
-            outputTruncated: output.truncated,
-            now: nowIso(deps),
-          }),
+        deps.store.transaction(
+          () =>
+            deps.store.runs.finish(run.id, {
+              status,
+              exitCode: exit.exitCode,
+              outputBytes: output.bytes,
+              outputTruncated: output.truncated,
+              now: nowIso(deps),
+            }),
+          'reserve',
         );
         if (exit.leftoverError !== null) {
           deps.logger.error('processes left by the agent could not be stopped', {

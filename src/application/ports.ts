@@ -2,7 +2,7 @@ import type { DecisionId, PlanId, RunId, WorkItemId } from '../domain/ids.ts';
 import type { Plan, PlanStatus } from '../domain/plan.ts';
 import type { AgentRun, Decision, Note, NoteKind, RunStatus } from '../domain/records.ts';
 import type { FilesystemPolicy } from '../domain/sandbox.ts';
-import type { DatabaseUsage } from '../domain/storage.ts';
+import type { DatabaseCapacity, DatabaseShape, DatabaseUsage } from '../domain/storage.ts';
 import type { WorkItem, WorkItemStatus } from '../domain/work-item.ts';
 import type { ObservedWorkspace, WorkspaceIdentity } from '../domain/workspace.ts';
 
@@ -12,8 +12,14 @@ import type { ObservedWorkspace, WorkspaceIdentity } from '../domain/workspace.t
  */
 export type SyncResult<T> = T extends PromiseLike<unknown> ? never : T;
 
+/**
+ * `write`: ordinary durable writes. `reserve`: control and maintenance (pause, recording a
+ * run's result, cleanup, archive), which may also use the reserve kept for them.
+ */
+export type TransactionMode = 'write' | 'reserve';
+
 export interface Store {
-  transaction<T>(fn: () => SyncResult<T>): T;
+  transaction<T>(fn: () => SyncResult<T>, mode?: TransactionMode): T;
   readonly plans: PlanRepository;
   readonly workItems: WorkItemRepository;
   readonly runs: RunRepository;
@@ -112,12 +118,6 @@ export interface NoteRepository {
   listForPlan(planId: PlanId): Note[];
 }
 
-export interface CheckpointResult {
-  readonly busy: boolean;
-  readonly walPages: number;
-  readonly checkpointedPages: number;
-}
-
 export interface SchemaStatus {
   readonly databaseVersion: number;
   readonly supportedVersion: number;
@@ -130,7 +130,8 @@ export interface SchemaStatus {
 }
 
 export interface DatabaseMaintenance {
-  checkpoint(): CheckpointResult;
+  shape(): DatabaseShape;
+  capacity(): DatabaseCapacity;
   incrementalVacuum(): { freedPages: number };
   schemaStatus(): SchemaStatus;
 }

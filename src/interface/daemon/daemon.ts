@@ -15,7 +15,8 @@ import { GitWorkspaceInspector } from '../../infrastructure/git/workspace-inspec
 import { createLogger } from '../../infrastructure/logger.ts';
 import { ensureDir, ensurePrivateDir, type OrviaPaths } from '../../infrastructure/paths.ts';
 import { SqliteDatabaseFiles } from '../../infrastructure/sqlite/database-files.ts';
-import { openDatabase, setDatabaseHardCap } from '../../infrastructure/sqlite/database.ts';
+import { measureDatabaseFiles } from '../../infrastructure/sqlite/database-files.ts';
+import { openDatabase } from '../../infrastructure/sqlite/database.ts';
 import type { Migration, MigrationReport } from '../../infrastructure/sqlite/migrator.ts';
 import { MIGRATIONS } from '../../infrastructure/sqlite/migrations/index.ts';
 import { SqliteStore } from '../../infrastructure/sqlite/sqlite-store.ts';
@@ -61,11 +62,16 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     now: () => clock.now(),
     databaseMaxBytes: databaseBudgetBytes(config),
   });
-  const store = new SqliteStore(opened.db, options.migrations ?? MIGRATIONS);
+  const store = new SqliteStore(opened.db, options.migrations ?? MIGRATIONS, {
+    budgetBytes: databaseBudgetBytes(config),
+    fixedBytes: () => {
+      const usage = measureDatabaseFiles(paths.databaseFile, paths.backupDir);
+      return usage.walBytes + usage.shmBytes + usage.journalBytes + usage.backupBytes;
+    },
+  });
   let server: Server | null = null;
   try {
-    const limits = storageLimits(config, opened.walCheckpointBytes);
-    setDatabaseHardCap(opened, limits.databaseMaxBytes);
+    const limits = storageLimits(config);
     const agents = options.agents ?? [
       codexAdapter(config.agents.codex?.command),
       claudeAdapter(config.agents.claude?.command),

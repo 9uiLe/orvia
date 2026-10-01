@@ -1,5 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { OrviaError, isOrviaError } from '../../domain/errors.ts';
+import { databaseUsedBytes } from '../../domain/storage.ts';
+import { measureDatabaseFiles } from './database-files.ts';
 import {
   applyMigrations,
   assertCompatible,
@@ -23,9 +25,6 @@ export interface OpenDatabaseOptions {
 export interface OpenedDatabase {
   readonly db: DatabaseSync;
   readonly migration: MigrationReport;
-  readonly pageSize: number;
-  /** Bytes the WAL may reach before the automatic checkpoint resets it. */
-  readonly walCheckpointBytes: number;
 }
 
 const SQLITE_BUSY = 5;
@@ -69,6 +68,51 @@ function pragmaValue(db: DatabaseSync, pragma: string): unknown {
 }
 
 /**
+ * Connection settings that make every database-related file bounded:
+ * - rollback journal (DELETE): a transaction's journal holds each original page at most once,
+ *   unlike WAL, whose growth within a transaction no pragma can cap;
+ * - journal_size_limit = 0: in exclusive locking mode the journal is not deleted after commit,
+ *   so it is truncated to zero bytes instead;
+ * - cache_spill = OFF: the journal is synced only at commit, so it has a single header; dirty
+ *   pages stay in memory until then, bounded by the page cap;
+ * - temp_store = MEMORY: sorting, transient indices, and temporary tables never create files
+ *   in the OS temporary directory (tested in test/integration/storage-contract.test.ts).
+ */
+function configureConnection(db: DatabaseSync): void {
+  db.exec('PRAGMA journal_size_limit = 0');
+  db.exec('PRAGMA cache_spill = OFF');
+  db.exec('PRAGMA temp_store = MEMORY');
+}
+
+/**
+ * A database left in WAL mode (by an earlier Orvia build, or a crash of one) is converted to
+ * rollback-journal mode, which folds the WAL into the main file while both still exist. Each
+ * WAL frame carries one page, so the main file can grow by at most the WAL's size: the peak is
+ * at most main + 2 × WAL + the other files. This is checked before SQLite opens the file,
+ * because closing a WAL connection checkpoints it, which would itself change the files.
+ */
+function assertWalTransitionFits(options: OpenDatabaseOptions): void {
+  const usage = measureDatabaseFiles(options.path, options.backupDir);
+  if (usage.walBytes === 0) return;
+  const peakBytes = databaseUsedBytes(usage) + usage.walBytes;
+  if (peakBytes <= options.databaseMaxBytes) return;
+  throw new OrviaError(
+    'STORAGE_HARD_LIMIT',
+    `the database was left in WAL mode; converting it needs up to ${peakBytes} bytes but ` +
+      `storage.database_max_mb allows ${options.databaseMaxBytes}. Raise it; nothing was changed.`,
+    {
+      blockedBy: ['database'],
+      blockedOperation: 'leave WAL mode',
+      configuredLimitBytes: options.databaseMaxBytes,
+      currentUsageBytes: databaseUsedBytes(usage),
+      estimatedRequiredTotalBytes: peakBytes,
+      requiredAdditionalBytes: peakBytes - databaseUsedBytes(usage),
+      configKey: 'storage.database_max_mb',
+    },
+  );
+}
+
+/**
  * Opens the database as its sole owner.
  *
  * `locking_mode = EXCLUSIVE` makes SQLite hold its file lock for the life of the connection,
@@ -78,36 +122,27 @@ function pragmaValue(db: DatabaseSync, pragma: string): unknown {
  */
 export function openDatabase(options: OpenDatabaseOptions): OpenedDatabase {
   validateMigrationList(options.migrations);
+  assertWalTransitionFits(options);
   const db = new DatabaseSync(options.path, { timeout: 0, enableForeignKeyConstraints: true });
   try {
     db.exec('PRAGMA locking_mode = EXCLUSIVE');
+    // The first read rolls back a hot journal left by a crash; that restores original pages and
+    // truncates the file to its original size, so it never grows storage.
     const header = readHeader(db);
     assertCompatible(header, latestVersion(options.migrations));
+    configureConnection(db);
     if (header.pageCount === 0) initializeFreshDatabase(db);
-    const pageSize = Number(pragmaValue(db, 'page_size'));
-    const walCheckpointBytes = Number(pragmaValue(db, 'wal_autocheckpoint')) * pageSize;
+    if (pragmaValue(db, 'journal_mode = DELETE') !== 'delete') {
+      throw new OrviaError('INTERNAL', 'could not select rollback-journal mode');
+    }
     const migration = applyMigrations(db, options.migrations, {
       backupDir: options.backupDir,
       now: options.now,
-      budget: { databaseMaxBytes: options.databaseMaxBytes, reserveBytes: walCheckpointBytes },
+      budgetBytes: options.databaseMaxBytes,
     });
-    if (pragmaValue(db, 'journal_mode = WAL') !== 'wal') {
-      throw new OrviaError('INTERNAL', 'could not enable WAL journal mode');
-    }
-    // Truncate the WAL back to one checkpoint interval after each checkpoint.
-    db.exec(`PRAGMA journal_size_limit = ${walCheckpointBytes}`);
-    return { db, migration, pageSize, walCheckpointBytes };
+    return { db, migration };
   } catch (error) {
     db.close();
     throw translateSqliteError(error);
   }
-}
-
-/**
- * The last fuse during normal operation: SQLite refuses to grow the main database file beyond
- * this many bytes. Migrations use their own, tighter cap (see applyMigrations).
- */
-export function setDatabaseHardCap(opened: OpenedDatabase, maxBytes: number): void {
-  const pages = Math.max(1, Math.floor(maxBytes / opened.pageSize));
-  opened.db.exec(`PRAGMA max_page_count = ${pages}`);
 }

@@ -1,6 +1,5 @@
 import type { DatabaseSync, SQLInputValue, StatementSync } from 'node:sqlite';
 import type {
-  CheckpointResult,
   DatabaseMaintenance,
   DecisionRepository,
   NoteRepository,
@@ -9,6 +8,7 @@ import type {
   SchemaStatus,
   Store,
   SyncResult,
+  TransactionMode,
   WorkItemPatch,
   WorkItemRepository,
 } from '../../application/ports.ts';
@@ -22,6 +22,11 @@ import {
   type WorkItemId,
 } from '../../domain/ids.ts';
 import { PLAN_STATUSES, type Plan, type PlanStatus } from '../../domain/plan.ts';
+import {
+  databaseCapacity,
+  type DatabaseCapacity,
+  type DatabaseShape,
+} from '../../domain/storage.ts';
 import type { AgentRun, Decision, Note, NoteKind, RunStatus } from '../../domain/records.ts';
 import { WORK_ITEM_STATUSES, type WorkItem, type WorkItemStatus } from '../../domain/work-item.ts';
 import { isUniqueViolation, translateSqliteError } from './database.ts';
@@ -140,6 +145,13 @@ function countsFrom<S extends string>(rows: Row[], statuses: readonly S[]): Reco
   return counts;
 }
 
+export interface StoreBudget {
+  /** `storage.database_max_mb` in bytes. */
+  readonly budgetBytes: number;
+  /** Current size of every budgeted file other than the main database and its journal. */
+  readonly fixedBytes: () => number;
+}
+
 /** All SQL lives in this module and queries.ts; the application sees only the Store port. */
 export class SqliteStore implements Store {
   readonly plans: PlanRepository;
@@ -149,10 +161,13 @@ export class SqliteStore implements Store {
   readonly notes: NoteRepository;
   readonly maintenance: DatabaseMaintenance;
   readonly #db: DatabaseSync;
+  readonly #budget: StoreBudget;
   readonly #statements = new Map<string, StatementSync>();
+  #btreeCount: number | undefined;
 
-  constructor(db: DatabaseSync, migrations: readonly Migration[]) {
+  constructor(db: DatabaseSync, migrations: readonly Migration[], budget: StoreBudget) {
     this.#db = db;
+    this.#budget = budget;
     const one = (sql: string, ...params: SQLInputValue[]): Row | undefined =>
       this.#prepare(sql).get(...params);
     const all = (sql: string, ...params: SQLInputValue[]): Row[] =>
@@ -368,18 +383,16 @@ export class SqliteStore implements Store {
     };
 
     this.maintenance = {
-      checkpoint: (): CheckpointResult => {
-        const row = one('PRAGMA wal_checkpoint(TRUNCATE)');
-        if (row === undefined) throw new OrviaError('INTERNAL', 'wal_checkpoint returned no row');
-        return {
-          busy: num(row, 'busy') !== 0,
-          walPages: num(row, 'log'),
-          checkpointedPages: num(row, 'checkpointed'),
-        };
-      },
+      shape: () => this.#shape(),
+      capacity: () => this.#capacity(this.#shape()),
       incrementalVacuum: () => {
+        this.#applyCapacity('reserve');
         const before = num(one('PRAGMA freelist_count') ?? {}, 'freelist_count');
-        this.#db.exec('PRAGMA incremental_vacuum');
+        try {
+          this.#db.exec('PRAGMA incremental_vacuum');
+        } catch (error) {
+          throw this.#storageError(error, 'reserve');
+        }
         const after = num(one('PRAGMA freelist_count') ?? {}, 'freelist_count');
         return { freedPages: before - after };
       },
@@ -391,10 +404,16 @@ export class SqliteStore implements Store {
     };
   }
 
-  transaction<T>(fn: () => SyncResult<T>): T {
+  /**
+   * Every transaction is capped so that the main file plus its worst-case rollback journal plus
+   * all other budgeted files stay within `storage.database_max_mb`; SQLite enforces the cap with
+   * max_page_count and fails the transaction with SQLITE_FULL instead of growing past it.
+   */
+  transaction<T>(fn: () => SyncResult<T>, mode: TransactionMode = 'write'): T {
     if (this.#inTransaction()) {
       throw new OrviaError('INTERNAL', 'nested transactions are not supported');
     }
+    this.#applyCapacity(mode);
     this.#db.exec('BEGIN IMMEDIATE');
     try {
       const result = fn();
@@ -402,8 +421,78 @@ export class SqliteStore implements Store {
       return result;
     } catch (error) {
       if (this.#inTransaction()) this.#db.exec('ROLLBACK');
-      throw translateSqliteError(error);
+      throw this.#storageError(error, mode);
     }
+  }
+
+  #shape(): DatabaseShape {
+    this.#btreeCount ??= num(
+      this.#prepare('SELECT count(*) AS n FROM sqlite_schema WHERE rootpage > 0').get() ?? {},
+      'n',
+    );
+    return {
+      pageSize: num(this.#prepare('PRAGMA page_size').get() ?? {}, 'page_size'),
+      pageCount: num(this.#prepare('PRAGMA page_count').get() ?? {}, 'page_count'),
+      btreeCount: this.#btreeCount,
+    };
+  }
+
+  #capacity(shape: DatabaseShape): DatabaseCapacity {
+    return databaseCapacity({
+      budgetBytes: this.#budget.budgetBytes,
+      fixedBytes: this.#budget.fixedBytes(),
+      pageSize: shape.pageSize,
+      btreeCount: shape.btreeCount,
+    });
+  }
+
+  #applyCapacity(mode: TransactionMode): void {
+    const shape = this.#shape();
+    const capacity = this.#capacity(shape);
+    if (shape.pageCount > capacity.maxPages) {
+      // The journal of a transaction on a database this large could itself exceed the budget.
+      throw this.#limitError(
+        mode,
+        shape,
+        capacity,
+        'the database is larger than the budget allows',
+      );
+    }
+    const cap = mode === 'write' ? capacity.writeMaxPages : capacity.maxPages;
+    // SQLite never lowers max_page_count below the current size, so writes on a database
+    // already past writeMaxPages may still update in place but cannot grow it.
+    this.#db.exec(`PRAGMA max_page_count = ${Math.max(cap, 1)}`);
+  }
+
+  #storageError(error: unknown, mode: TransactionMode): unknown {
+    const translated = translateSqliteError(error);
+    if (translated instanceof OrviaError && translated.code === 'STORAGE_HARD_LIMIT') {
+      const shape = this.#shape();
+      return this.#limitError(mode, shape, this.#capacity(shape), 'the change needs more space');
+    }
+    return translated;
+  }
+
+  #limitError(
+    mode: TransactionMode,
+    shape: DatabaseShape,
+    capacity: DatabaseCapacity,
+    reason: string,
+  ): OrviaError {
+    return new OrviaError(
+      'STORAGE_HARD_LIMIT',
+      `database storage limit: ${reason}; nothing was written. Run storage cleanup or raise ` +
+        'storage.database_max_mb.',
+      {
+        blockedBy: ['database'],
+        transactionMode: mode,
+        configuredLimitBytes: this.#budget.budgetBytes,
+        dataBytes: shape.pageCount * shape.pageSize,
+        writeCapacityBytes: capacity.writeMaxPages * shape.pageSize,
+        maxCapacityBytes: capacity.maxPages * shape.pageSize,
+        otherFilesBytes: this.#budget.fixedBytes(),
+      },
+    );
   }
 
   #inTransaction(): boolean {

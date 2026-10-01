@@ -12,7 +12,7 @@ import {
 import { identityFromObservation } from '../domain/workspace.ts';
 import { nowIso, type Dependencies } from './dependencies.ts';
 import { requirePlan } from './plans.ts';
-import type { WorktreeEntry } from './ports.ts';
+import type { TransactionMode, WorktreeEntry } from './ports.ts';
 
 export interface WorkItemDetails {
   readonly workItem: WorkItem;
@@ -144,6 +144,11 @@ export async function bindWorkspace(
   });
 }
 
+/** Resume and archive are human controls that must work at HARD_LIMIT; completing is a write. */
+function transactionModeFor(kind: Exclude<WorkItemTransition, 'pause'>): TransactionMode {
+  return kind === 'complete' ? 'write' : 'reserve';
+}
+
 export function transition(
   deps: Dependencies,
   input: { workItemId: WorkItemId },
@@ -160,7 +165,7 @@ export function transition(
       );
     }
     return deps.store.workItems.update(item.id, { status }, nowIso(deps));
-  });
+  }, transactionModeFor(kind));
 }
 
 /** Returns once the Work Item's agent process tree has stopped and the Work Item is paused. */
@@ -175,7 +180,7 @@ export async function pauseWorkItem(
       const item = requireWorkItem(deps, input.workItemId);
       const status = transitionWorkItem(item, 'pause');
       return deps.store.workItems.update(item.id, { status }, nowIso(deps));
-    }),
+    }, 'reserve'),
   );
 }
 

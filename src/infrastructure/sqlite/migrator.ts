@@ -3,7 +3,13 @@ import { mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { OrviaError } from '../../domain/errors.ts';
-import type { DatabaseUsage } from '../../domain/storage.ts';
+import {
+  databaseCapacity,
+  databaseUsedBytes,
+  JOURNAL_HEADER_BYTES,
+  JOURNAL_RECORD_OVERHEAD_BYTES,
+  type DatabaseUsage,
+} from '../../domain/storage.ts';
 import { measureDatabaseFiles } from './database-files.ts';
 
 export interface Migration {
@@ -159,16 +165,6 @@ function timestampForFile(date: Date): string {
 const PARTIAL_SUFFIX = '.partial';
 const SQLITE_FULL = 13;
 
-/** A rollback-journal record is the page plus a 4-byte page number and a 4-byte checksum. */
-const JOURNAL_RECORD_OVERHEAD = 8;
-
-export interface MigrationBudget {
-  /** `storage.database_max_mb` in bytes: database, WAL, SHM, journal, and backups together. */
-  readonly databaseMaxBytes: number;
-  /** Space kept free for maintenance after the migration (one WAL checkpoint interval). */
-  readonly reserveBytes: number;
-}
-
 export interface MigrationStoragePlan {
   readonly configuredLimitBytes: number;
   readonly currentUsageBytes: number;
@@ -176,6 +172,7 @@ export interface MigrationStoragePlan {
   readonly journalBoundBytes: number;
   readonly newBackupBytes: number;
   readonly existingBackupBytes: number;
+  /** Room kept for control and maintenance transactions after the migration. */
   readonly reserveBytes: number;
   readonly estimatedRequiredTotalBytes: number;
   readonly requiredAdditionalBytes: number;
@@ -184,46 +181,48 @@ export interface MigrationStoragePlan {
 }
 
 /**
- * Worst-case storage for applying migrations in rollback-journal mode, which bounds every
- * file involved:
- * - main database: at most `maxPageCount` pages (enforced by max_page_count);
- * - rollback journal: each page that existed when a transaction began is journaled at most
- *   once, so at most `maxPageCount` records plus a header;
- * - new backup: `VACUUM INTO` copies only the pages in use;
- * - existing backups, SHM, and the maintenance reserve are added as they are.
- * The page cap is the largest that fits the budget; the migration needs at least its current
- * size plus the declared headroom.
+ * Worst-case storage for applying migrations, using the same capacity model as every other
+ * transaction (domain/storage.ts databaseCapacity) with the new backup added to the fixed
+ * files. The migrated database must still leave the control/maintenance reserve free.
  */
 export function planMigrationStorage(input: {
   readonly usage: DatabaseUsage;
   readonly pageSize: number;
   readonly pageCount: number;
   readonly freelistCount: number;
+  readonly btreeCount: number;
   readonly headroomBytes: number;
   readonly needsBackup: boolean;
-  readonly budget: MigrationBudget;
+  readonly budgetBytes: number;
 }): MigrationStoragePlan {
-  const { usage, pageSize, budget } = input;
-  const perPage = pageSize + pageSize + JOURNAL_RECORD_OVERHEAD;
-  const journalHeader = pageSize;
+  const { usage, pageSize } = input;
+  const perPage = 2 * pageSize + JOURNAL_RECORD_OVERHEAD_BYTES;
   const newBackupBytes = input.needsBackup ? (input.pageCount - input.freelistCount) * pageSize : 0;
   const fixedBytes =
-    usage.backupBytes + newBackupBytes + usage.shmBytes + budget.reserveBytes + journalHeader;
+    usage.backupBytes + newBackupBytes + usage.walBytes + usage.shmBytes + usage.journalBytes;
+  const capacity = databaseCapacity({
+    budgetBytes: input.budgetBytes,
+    fixedBytes,
+    pageSize,
+    btreeCount: input.btreeCount,
+  });
+  const reservePages = capacity.maxPages - capacity.writeMaxPages;
   const neededPages = input.pageCount + Math.ceil(input.headroomBytes / pageSize);
-  const estimatedRequiredTotalBytes = fixedBytes + neededPages * perPage;
-  const currentUsageBytes =
-    usage.mainBytes + usage.walBytes + usage.shmBytes + usage.journalBytes + usage.backupBytes;
+  const estimatedRequiredTotalBytes =
+    (neededPages + reservePages) * perPage + JOURNAL_HEADER_BYTES + fixedBytes;
+  const currentUsageBytes = databaseUsedBytes(usage);
   return {
-    configuredLimitBytes: budget.databaseMaxBytes,
+    configuredLimitBytes: input.budgetBytes,
     currentUsageBytes,
     databaseBytes: neededPages * pageSize,
-    journalBoundBytes: journalHeader + neededPages * (pageSize + JOURNAL_RECORD_OVERHEAD),
+    journalBoundBytes:
+      JOURNAL_HEADER_BYTES + neededPages * (pageSize + JOURNAL_RECORD_OVERHEAD_BYTES),
     newBackupBytes,
     existingBackupBytes: usage.backupBytes,
-    reserveBytes: budget.reserveBytes,
+    reserveBytes: reservePages * perPage,
     estimatedRequiredTotalBytes,
     requiredAdditionalBytes: Math.max(0, estimatedRequiredTotalBytes - currentUsageBytes),
-    maxPageCount: Math.max(0, Math.floor((budget.databaseMaxBytes - fixedBytes) / perPage)),
+    maxPageCount: capacity.maxPages,
   };
 }
 
@@ -287,7 +286,7 @@ function errcode(error: unknown): number | null {
 export function applyMigrations(
   db: DatabaseSync,
   migrations: readonly Migration[],
-  options: { backupDir: string; now: () => Date; budget: MigrationBudget },
+  options: { backupDir: string; now: () => Date; budgetBytes: number },
 ): MigrationReport {
   validateMigrationList(migrations);
   const fromVersion = readHeader(db).userVersion;
@@ -307,9 +306,12 @@ export function applyMigrations(
     pageSize: pragmaNumber(db, 'page_size'),
     pageCount: pragmaNumber(db, 'page_count'),
     freelistCount: pragmaNumber(db, 'freelist_count'),
+    btreeCount: Number(
+      db.prepare('SELECT count(*) AS n FROM sqlite_schema WHERE rootpage > 0').get()?.['n'],
+    ),
     headroomBytes: pending.reduce((sum, migration) => sum + (migration.headroomBytes ?? 0), 0),
     needsBackup: fromVersion > 0,
-    budget: options.budget,
+    budgetBytes: options.budgetBytes,
   });
   if (plan.estimatedRequiredTotalBytes > plan.configuredLimitBytes) {
     throw storageError(
@@ -322,10 +324,6 @@ export function applyMigrations(
     );
   }
 
-  // Switching checkpoints the WAL into the main file; page_count above already included it.
-  if (pragmaText(db, 'journal_mode = DELETE') !== 'delete') {
-    throw new OrviaError('INTERNAL', 'could not switch to rollback-journal mode for migrations');
-  }
   let backupPath: string | null = null;
   if (fromVersion > 0) {
     integrityCheck(db);
@@ -382,9 +380,4 @@ export function applyMigrations(
 
 function mib(bytes: number): string {
   return (bytes / (1024 * 1024)).toFixed(1);
-}
-
-function pragmaText(db: DatabaseSync, pragma: string): string {
-  const row = db.prepare(`PRAGMA ${pragma}`).get();
-  return String(row === undefined ? '' : Object.values(row)[0]);
 }

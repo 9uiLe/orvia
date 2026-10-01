@@ -6,7 +6,7 @@ import {
   type StorageUsage,
 } from '../domain/storage.ts';
 import type { Dependencies } from './dependencies.ts';
-import type { CheckpointResult, CleanupFailure } from './ports.ts';
+import type { CleanupFailure } from './ports.ts';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -23,7 +23,6 @@ export interface CleanupReport {
   readonly cacheEntriesRemoved: number;
   readonly cacheBytesFreed: number;
   readonly backupsRemoved: string[];
-  readonly checkpoint: CheckpointResult | null;
   readonly vacuumedPages: number;
   readonly failures: CleanupFailure[];
 }
@@ -45,9 +44,15 @@ export class StorageService {
       database: await this.#deps.databaseFiles.measure(),
       cacheBytes: await this.#deps.cache.measureBytes(),
     };
+    const { maintenance } = this.#deps.store;
     return {
       usage,
-      assessment: assessStorage(usage, this.#deps.limits),
+      assessment: assessStorage(
+        usage,
+        this.#deps.limits,
+        maintenance.shape(),
+        maintenance.capacity(),
+      ),
       limits: this.#deps.limits,
     };
   }
@@ -86,7 +91,11 @@ export class StorageService {
 
     const pruned = attempt(
       'database:runs',
-      () => store.transaction(() => store.runs.pruneFinished(limits.maxCompletedRunsPerWorkItem)),
+      () =>
+        store.transaction(
+          () => store.runs.pruneFinished(limits.maxCompletedRunsPerWorkItem),
+          'reserve',
+        ),
       { runIds: [], outputRefs: [] },
     );
     failures.push(...(await cache.remove(pruned.outputRefs)));
@@ -111,7 +120,6 @@ export class StorageService {
     const backups = await databaseFiles.pruneBackups(expiresBefore);
     failures.push(...backups.failures);
 
-    const checkpoint = attempt('database:checkpoint', () => store.maintenance.checkpoint(), null);
     const vacuum = attempt('database:vacuum', () => store.maintenance.incrementalVacuum(), {
       freedPages: 0,
     });
@@ -132,7 +140,6 @@ export class StorageService {
       cacheEntriesRemoved: sweep.removed,
       cacheBytesFreed: sweep.freedBytes,
       backupsRemoved: backups.removed,
-      checkpoint,
       vacuumedPages: vacuum.freedPages,
       failures,
     };

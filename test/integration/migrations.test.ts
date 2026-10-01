@@ -129,7 +129,7 @@ describe('database migrations', () => {
     const db = new DatabaseSync(env.paths.databaseFile);
     try {
       assert.equal(pragma(db, 'auto_vacuum'), 2, 'auto_vacuum is INCREMENTAL');
-      assert.equal(pragma(db, 'journal_mode'), 'wal');
+      assert.equal(pragma(db, 'journal_mode'), 'delete');
       assert.equal(pragma(db, 'application_id'), ORVIA_APPLICATION_ID);
       const history = db
         .prepare('SELECT version, checksum, applied_at FROM orvia_schema_migrations')
@@ -276,7 +276,7 @@ describe('database migrations', () => {
       try {
         assert.deepEqual(migrated.migration.applied, [2]);
         assert.ok(migrated.migration.backupPath !== null);
-        assert.equal(pragma(migrated.db, 'journal_mode'), 'wal', 'WAL is restored afterwards');
+        assert.equal(pragma(migrated.db, 'journal_mode'), 'delete');
         assert.ok(
           statSync(migrated.migration.backupPath).size <= pagesInUse * pageSize,
           'the backup fits the preflight estimate (pages in use × page size)',
@@ -293,11 +293,11 @@ describe('database migrations', () => {
       mkdirSync(env.paths.backupDir, { recursive: true });
       writeFileSync(partial, Buffer.alloc(1000));
 
-      const error = migrationError(() => open([v1, v2], 8 * MIB));
+      const error = migrationError(() => open([v1, v2], 6 * MIB));
       assert.equal(error.code, 'MIGRATION_STORAGE_REQUIRED');
       const detail = (key: string) => Number(error.details[key]);
-      assert.equal(detail('configuredLimitBytes'), 8 * MIB);
-      assert.ok(detail('estimatedRequiredTotalBytes') > 8 * MIB);
+      assert.equal(detail('configuredLimitBytes'), 6 * MIB);
+      assert.ok(detail('estimatedRequiredTotalBytes') > 6 * MIB);
       assert.equal(
         detail('requiredAdditionalBytes'),
         detail('estimatedRequiredTotalBytes') - detail('currentUsageBytes'),
@@ -314,13 +314,13 @@ describe('database migrations', () => {
       const old = join(env.paths.backupDir, 'state-v0-earlier.db');
       writeFileSync(old, Buffer.alloc(4 * MIB));
 
-      const error = migrationError(() => open([v1, v2], 12 * MIB));
+      const error = migrationError(() => open([v1, v2], 10 * MIB));
       assert.equal(error.code, 'MIGRATION_STORAGE_REQUIRED');
       assert.equal((error.details as Record<string, number>)['existingBackupBytes'], 4 * MIB);
       assert.equal(userVersion(), 1);
 
       rmSync(old);
-      const migrated = open([v1, v2], 12 * MIB);
+      const migrated = open([v1, v2], 10 * MIB);
       migrated.db.close();
       assert.equal(userVersion(), 2, 'the same budget suffices without the old backup');
     });
