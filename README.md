@@ -276,6 +276,8 @@ What Orvia does **not** guarantee:
   settings (not an OS sandbox). How well that holds depends on the agent.
 - Workspace identity is checked immediately before launch, not continuously. An agent or a
   person can still change branches or files afterwards.
+- `get_run_output` returns agent output to whichever client asks for it, including ChatGPT.
+  Agent output can contain your source code.
 - MCP clients and ChatGPT are subject to prompt injection from content they read. Write tools
   require ChatGPT's confirmation, but review what you approve.
 - Windows has not been tested.

@@ -18,7 +18,7 @@ describe('orvia CLI', () => {
     daemon = null;
   });
   afterEach(async () => {
-    if (daemon !== null) {
+    if (daemon !== null && daemon.exitCode === null && daemon.signalCode === null) {
       const exited = new Promise((resolve) => daemon?.once('exit', resolve));
       daemon.kill('SIGTERM');
       await exited;
