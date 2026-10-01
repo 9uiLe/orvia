@@ -1,0 +1,71 @@
+name: Bug report
+description: Report something that does not work as expected
+labels: ['bug']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        > **Do not paste secrets, credentials, tokens, or private source code in this issue.**
+        > Sanitize logs before posting. Security vulnerabilities must be reported privately via
+        > [GitHub private vulnerability reporting](https://github.com/9uiLe/orvia/security/advisories/new).
+  - type: input
+    id: version
+    attributes:
+      label: Orvia version
+      description: Output of `orvia --version`, or the commit SHA.
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      description: Name and version, for example macOS 15 or Ubuntu 24.04.
+    validations:
+      required: true
+  - type: input
+    id: nix
+    attributes:
+      label: Nix version
+      description: Output of `nix --version`, if you use Nix.
+    validations:
+      required: false
+  - type: input
+    id: node
+    attributes:
+      label: Node.js version
+      description: Output of `node --version`.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs (sanitized)
+      description: Remove secrets, tokens, and private paths or source before pasting.
+      render: shell
+    validations:
+      required: false
+  - type: checkboxes
+    id: no-secrets
+    attributes:
+      label: Confirmation
+      options:
+        - label: This issue contains no secrets, tokens, credentials, or private source code.
+          required: true

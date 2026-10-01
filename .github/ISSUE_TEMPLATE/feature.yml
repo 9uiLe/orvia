@@ -1,0 +1,44 @@
+name: Feature request
+description: Propose a new feature or change
+labels: ['enhancement']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        > **Do not paste secrets, credentials, tokens, or private source code in this issue.**
+        > Security vulnerabilities must be reported privately via
+        > [GitHub private vulnerability reporting](https://github.com/9uiLe/orvia/security/advisories/new).
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and what gets in the way?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: true
+  - type: checkboxes
+    id: impact
+    attributes:
+      label: Does this affect any of the following?
+      options:
+        - label: Human-on-the-loop control (how a human observes or intervenes)
+        - label: Storage (persisted state or schema)
+        - label: Safety (what agents are allowed to do)
+  - type: checkboxes
+    id: no-secrets
+    attributes:
+      label: Confirmation
+      options:
+        - label: This issue contains no secrets, tokens, credentials, or private source code.
+          required: true
