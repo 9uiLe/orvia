@@ -7,7 +7,7 @@
 
 Durable state (Plans, Work Items, decisions, feedback) must survive restarts and upgrades. Agents
 run for minutes; a write transaction must never span an agent run. Only the daemon may touch the
-database. Sources: <https://sqlite.org/wal.html>, <https://sqlite.org/pragma.html>,
+database. Sources: <https://sqlite.org/pragma.html>,
 <https://sqlite.org/lang_transaction.html>, <https://nodejs.org/docs/latest-v24.x/api/sqlite.html>.
 
 ## Decision
@@ -35,17 +35,19 @@ database. Sources: <https://sqlite.org/wal.html>, <https://sqlite.org/pragma.htm
 
 ### Configuration
 
-| Setting              | Value                            | Reason                                                                                                                                        |
-| -------------------- | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `journal_mode`       | `WAL`                            | Persistent; durable commits without rewriting the main file.                                                                                  |
-| `foreign_keys`       | on                               | `node:sqlite` enables it by default (`enableForeignKeyConstraints`).                                                                          |
-| `auto_vacuum`        | `INCREMENTAL`                    | Set before the first page is written (must precede `application_id`); lets cleanup return free pages with `incremental_vacuum`.               |
-| `wal_autocheckpoint` | SQLite default (1000 pages)      | Passive checkpoints during normal use.                                                                                                        |
-| `journal_size_limit` | `wal_autocheckpoint × page_size` | WAL is truncated back to one interval after a checkpoint.                                                                                     |
-| `max_page_count`     | `database_max_mb` in pages       | Last fuse: SQLite refuses to grow past the limit (`SQLITE_FULL` → `STORAGE_HARD_LIMIT`). During migrations a tighter cap applies (see below). |
-| `application_id`     | `0x4f525649` ("ORVI")            | Foreign database files are rejected.                                                                                                          |
+| Setting              | Value                        | Reason                                                                                                                                           |
+| -------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `journal_mode`       | `DELETE` (rollback journal)  | Its size is bounded by the database; WAL growth is not ([ADR 0009](0009-storage-contract.md)).                                                   |
+| `journal_size_limit` | 0                            | In exclusive locking mode the journal is kept after commit; this truncates it to zero.                                                           |
+| `cache_spill`        | OFF                          | The journal is synced once, at commit, so it has a single header.                                                                                |
+| `temp_store`         | MEMORY                       | Sorts and transient indices create no files outside the budget.                                                                                  |
+| `foreign_keys`       | on                           | `node:sqlite` enables it by default (`enableForeignKeyConstraints`).                                                                             |
+| `auto_vacuum`        | `INCREMENTAL`                | Set before the first page is written (must precede `application_id`); lets cleanup return free pages with `incremental_vacuum`.                  |
+| `max_page_count`     | set before every transaction | The page cap from the storage contract (ADR 0009). SQLite fails a transaction that would grow past it with `SQLITE_FULL` → `STORAGE_HARD_LIMIT`. |
+| `application_id`     | `0x4f525649` ("ORVI")        | Foreign database files are rejected.                                                                                                             |
 
-Storage cleanup runs `wal_checkpoint(TRUNCATE)` and `incremental_vacuum`, then re-measures.
+Storage cleanup runs `incremental_vacuum` after deleting rows, then re-measures. A database left in
+WAL mode by an earlier build is converted at startup (ADR 0009).
 
 ### Query-driven schema
 
@@ -80,14 +82,11 @@ worktree and per branch, one running run per Work Item.
   byte-identical), and a checksum mismatch fails with `MIGRATION_CHECKSUM_MISMATCH`.
 - When migrations are pending, they never take Orvia's files past `storage.database_max_mb`:
   1. Leftover `*.partial` backups are deleted.
-  2. **Storage preflight**, before anything is written. Migrations run in rollback-journal mode,
-     not WAL. A rollback journal records each page that existed when the transaction began at
-     most once, so its size is bounded. WAL growth inside one transaction cannot be capped by
-     SQLite. The worst case is therefore computable:
-     `pages × page_size` (database) + `pages × (page_size + 8) + page_size` (journal) + pages in
-     use × `page_size` (new backup) + existing backups + SHM + maintenance reserve, where
-     `pages` is the current page count plus any `headroomBytes` the pending migrations declare.
-     If it exceeds the limit, startup fails with `MIGRATION_STORAGE_REQUIRED`. The details give
+  2. **Storage preflight**, before anything is written, using the capacity model of
+     [ADR 0009](0009-storage-contract.md) with the new backup (pages in use × `page_size`) added
+     to the other files. The current page count plus any `headroomBytes` that pending migrations
+     declare must fit within the write capacity, so the control reserve survives the migration.
+     If it does not, startup fails with `MIGRATION_STORAGE_REQUIRED`. The details give
      the configured limit, current usage, the estimated required total, and the additional
      bytes needed. Nothing is changed.
   3. `integrity_check`, then a backup with `VACUUM INTO` (latest only; older backups are deleted
@@ -97,16 +96,15 @@ worktree and per branch, one running run per Work Item.
      migration that grows past the cap gets `SQLITE_FULL`, is rolled back, and fails with
      `MIGRATION_STORAGE_REQUIRED`. Any other failure rolls back with `MIGRATION_FAILED`. The
      backup is kept for recovery in both cases.
-  5. `integrity_check`, then back to WAL (the journal file is removed).
+  5. `integrity_check`.
 - This means migrating needs roughly three times the database size within the budget (database,
   journal, backup). If the database has grown past about a third of `database_max_mb`, raise the
   limit before upgrading. Because the daemon cannot start until migrations succeed, `orvia
 cleanup` is not available at that point. Old backups can be deleted from the backup directory
   by hand.
 - Per the SQLite documentation, `VACUUM INTO` writes the vacuumed copy directly into the target
-  file instead of the transient database a plain `VACUUM` uses. Any other temporary files SQLite
-  creates (for example, sort files while rebuilding indexes) go to the OS temporary directory
-  (`SQLITE_TMPDIR`, `TMPDIR`) and are not counted against `database_max_mb`.
+  file instead of the transient database a plain `VACUUM` uses. Other temporary data stays in
+  memory with `temp_store = MEMORY` (ADR 0009 describes the test and the limits of that claim).
 - Backups and the rollback journal count toward the database budget. Backups expire after
   `retention_days`.
 - Large changes follow expand → migrate/backfill → contract across releases. A migration that

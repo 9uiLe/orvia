@@ -83,7 +83,7 @@ orvia CLI ─────────────────────┤  Un
                          ├── Application: operation registry, use cases, run supervisor
                          ├── Domain: Plan, Work Item, workspace identity, storage policy
                          └── Infrastructure
-                             ├── SQLite (node:sqlite, WAL, exclusive lock, migrations)
+                             ├── SQLite (node:sqlite, rollback journal, exclusive lock, migrations)
                              ├── git (read-only plumbing)
                              ├── cache (ephemeral, bounded)
                              └── agent adapters ── Codex, Claude Code
@@ -236,16 +236,30 @@ reports the result.
 Large text (agent output, diffs, source, prompts) is never stored in SQLite. Storage cleanup
 never touches git repositories, worktrees, branches, or commits; this is tested.
 
+**`database_max_mb` is a hard budget.** It covers `state.db`, its rollback journal, any WAL or SHM
+left by an older build, and every migration backup. Orvia's database operations never take
+their sum past it, during normal writes, migrations, or startup after a crash. Before every
+transaction Orvia caps how far SQLite may grow the database (`max_page_count`) so that the
+database plus its worst-case journal plus the other files fit. A write that would not fit is
+refused, or stopped by SQLite and rolled back, with `STORAGE_HARD_LIMIT`. The cost: data can use
+about half of what the backups leave, because the other half is kept for the journal. This is
+tested by sampling file sizes during writes near the limit, conversion of a database left in WAL
+mode, and crash recovery. Details: [ADR 0009](docs/adr/0009-storage-contract.md).
+
+SQLite's temporary data (sorts, transient indexes) is kept in memory (`temp_store = MEMORY`), and
+a test confirms that Orvia's workload creates no files in the OS temporary directory. SQLite
+does not promise how it uses temporary files, and filesystem overhead is outside the budget.
+
 **Migrations stay within the limit.** Before a schema migration Orvia checks that the database,
-a rollback journal, a backup, existing backups, and the maintenance reserve all fit in
+its journal, a new backup, existing backups, and the control reserve all fit in
 `database_max_mb`. If they do not, the daemon refuses to start with
 `MIGRATION_STORAGE_REQUIRED` and changes nothing. The error says how many bytes are needed. In
 practice a migration needs about three times the database size within the budget.
 
 **When durable data fills the budget.** Cleanup only removes run records, cache, and expired
 backups; it never deletes Plans, Work Items, decisions, or notes. Archiving changes a status and
-frees almost no space. If durable data alone reaches `HARD_LIMIT`, the only remedy today is to
-raise `storage.database_max_mb`. Export, explicit deletion of archived data, and a compaction
+frees almost no space. If durable data alone reaches the write capacity (`HARD_LIMIT`), the only
+remedy today is to raise `storage.database_max_mb`. Export, explicit deletion of archived data, and a compaction
 command are planned.
 Details: [ADR 0004](docs/adr/0004-storage-policy.md).
 
@@ -274,18 +288,18 @@ Details: [ADR 0004](docs/adr/0004-storage-policy.md).
 }
 ```
 
-| Key                                        | Meaning                                                             |
-| ------------------------------------------ | ------------------------------------------------------------------- |
-| `log_level`                                | `error`, `warn`, `info`, `debug`, or `trace`                        |
-| `storage.database_max_mb`                  | state.db + WAL + SHM + migration journal + migration backups        |
-| `storage.cache_max_mb`                     | agent output cache                                                  |
-| `storage.retention_days`                   | cache entries and migration backups                                 |
-| `storage.max_completed_runs_per_work_item` | finished run records kept per Work Item                             |
-| `storage.pressure_percent`                 | cleanup starts                                                      |
-| `storage.warning_percent`                  | status reports `WARNING`                                            |
-| `agents.<name>.command`                    | executable name on `PATH`, or a path                                |
-| `agents.termination_grace_ms`              | time between `SIGTERM` and `SIGKILL` when stopping an agent         |
-| `agents.kill_confirmation_ms`              | how long to wait for the process group to disappear after `SIGKILL` |
+| Key                                        | Meaning                                                                   |
+| ------------------------------------------ | ------------------------------------------------------------------------- |
+| `log_level`                                | `error`, `warn`, `info`, `debug`, or `trace`                              |
+| `storage.database_max_mb`                  | hard budget for state.db + journal + leftover WAL/SHM + migration backups |
+| `storage.cache_max_mb`                     | agent output cache                                                        |
+| `storage.retention_days`                   | cache entries and migration backups                                       |
+| `storage.max_completed_runs_per_work_item` | finished run records kept per Work Item                                   |
+| `storage.pressure_percent`                 | cleanup starts                                                            |
+| `storage.warning_percent`                  | status reports `WARNING`                                                  |
+| `agents.<name>.command`                    | executable name on `PATH`, or a path                                      |
+| `agents.termination_grace_ms`              | time between `SIGTERM` and `SIGKILL` when stopping an agent               |
+| `agents.kill_confirmation_ms`              | how long to wait for the process group to disappear after `SIGKILL`       |
 
 JSON instead of TOML keeps the runtime free of a parser dependency
 ([ADR 0007](docs/adr/0007-external-dependencies.md)).
@@ -294,9 +308,11 @@ by the maintainer.
 They are starting points to revisit with real usage data, not measured optima. Invalid values
 stop the daemon with `CONFIG_INVALID`.
 
-Pressure levels: `NORMAL` → `PRESSURE` (cleanup starts) → `WARNING` → `HARD_LIMIT` (limit minus
-a maintenance reserve of one WAL checkpoint interval). At `HARD_LIMIT`, status, storage status,
-pause/resume, cleanup, and archive keep working; new writes and agent runs are refused. Archive
+Pressure levels: `NORMAL` → `PRESSURE` (cleanup starts) → `WARNING` → `HARD_LIMIT`. For the
+database they compare the data size with its write capacity (`get_storage_status` reports
+`dataBytes` and `writeCapacityBytes`); for the cache, the cache size with `cache_max_mb`. At
+`HARD_LIMIT`, status, storage status, pause/resume, cleanup, and archive keep working (they may
+use a small reserve above the write capacity); new writes and agent runs are refused. Archive
 is allowed so work can be wound down; it does not free space.
 
 ## Security model
@@ -312,6 +328,7 @@ What Orvia does:
 - Runs each agent in its own process group (macOS/Linux) and, on pause or shutdown, stops the
   whole group and confirms it is gone before reporting success.
 - Passes prompts to agents on stdin, not on the command line.
+- Never lets its own database files exceed `storage.database_max_mb` (see Storage model).
 - Stores no credentials and sends no telemetry. Logs contain ids and counts, not prompts, agent
   output, or file contents.
 
@@ -340,7 +357,9 @@ Report vulnerabilities privately: [SECURITY.md](SECURITY.md).
 
 `npm run bench` measures the status queries ChatGPT triggers. On an Apple Silicon laptop
 (Node 24.21, 100 Plans × 5 Work Items), p95 latency was 0.02–1.0 ms in-process and 0.08–1.5 ms
-over the daemon socket. The brief's candidate budget is p95 < 50 ms. CI does not enforce it
+over the daemon socket with the earlier WAL configuration. `npm run bench:storage` measures the
+full operation mix and file sizes; with the rollback journal, writes are 0.65–0.85 ms and
+`get_status` 1.39–1.43 ms at p95 ([results](docs/benchmarks/2026-10-02-journal-mode.md)). The brief's candidate budget is p95 < 50 ms. CI does not enforce it
 because shared runners vary too much for a fixed threshold to mean anything.
 
 ## Roadmap

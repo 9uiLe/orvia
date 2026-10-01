@@ -30,4 +30,15 @@ Before 1.0.0, minor versions may contain breaking changes.
   `SIGTERM` to `SIGKILL`, and returns only after it is gone; it fails with
   `AGENT_TERMINATION_FAILED` instead of reporting a paused Work Item whose agent still runs.
   Daemon shutdown uses the same procedure.
+- `storage.database_max_mb` is now a hard budget during normal operation, not only during
+  migrations. The database uses a rollback journal instead of WAL. Every transaction is capped
+  so that the database, its worst-case journal, and backups fit. Writes that would not fit fail
+  with `STORAGE_HARD_LIMIT` and are rolled back. A database left in WAL mode is converted at
+  startup only if the conversion peak fits. SQLite temporary data is kept in memory.
+
+### Changed
+
+- Database writes are a few tenths of a millisecond slower (rollback journal; see
+  `docs/benchmarks/2026-10-02-journal-mode.md`), and data can use about half of the database
+  budget left after backups.
 - `AgentAdapter` abstraction with experimental Codex and Claude Code adapters.
