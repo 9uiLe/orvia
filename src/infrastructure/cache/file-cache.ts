@@ -164,7 +164,14 @@ export class FileCache implements EphemeralStore {
       }
       for (const name of names) {
         const path = join(dir, name);
-        const info = await lstat(path);
+        let info;
+        try {
+          info = await lstat(path);
+        } catch (error) {
+          // A concurrent cleanup may remove an entry between readdir and lstat.
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+          throw error;
+        }
         if (info.isDirectory()) await walk(path);
         else
           entries.push({
