@@ -13,8 +13,10 @@ metadata files to them would leak Orvia into every project that uses it.
 - Orvia writes nothing into a target repository: no `.orvia/`, `.ai/`, `.gitignore` entries,
   metadata, or configuration files. Agents may change the repository as their task requires; that
   is the agent's work, not Orvia's state.
-- Orvia reads repositories only through read-only git plumbing (`rev-parse`, `symbolic-ref`,
-  `worktree list`) with `GIT_OPTIONAL_LOCKS=0`, all spawned from
+- Orvia reads repositories only through read-only git commands (`rev-parse`, `symbolic-ref`,
+  `worktree list`, `status --porcelain=v1 --untracked-files=all`, and
+  `diff --no-color --no-ext-diff --no-textconv <base> --`; the last two collect review evidence,
+  [ADR 0011](0011-agent-profiles-and-capabilities.md)) with `GIT_OPTIONAL_LOCKS=0`, all spawned from
   `src/infrastructure/git/git-cli.ts` (enforced by ESLint).
 - Existing project files such as `AGENTS.md`, `CLAUDE.md`, or `README` may be read by agents;
   Orvia never uses them to store state.

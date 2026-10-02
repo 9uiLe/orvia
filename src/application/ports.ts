@@ -56,8 +56,8 @@ export interface WorkItemPatch {
   title?: string;
   description?: string;
   status?: WorkItemStatus;
-  branch?: string | null;
   prUrl?: string | null;
+  /** Also sets the Work Item's branch to the identity's; the two share one column. */
   workspace?: WorkspaceIdentity | null;
 }
 
@@ -110,7 +110,6 @@ export interface RunRepository {
   /** Finished runs beyond the newest `keep` per Work Item. */
   listFinishedBeyond(keep: number): { runId: RunId; outputRef: string | null }[];
   delete(id: RunId): void;
-  listOutputRefs(): string[];
 }
 
 export interface CyclePatch {

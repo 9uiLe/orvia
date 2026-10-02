@@ -1,10 +1,11 @@
-import { assertTransition, isStage } from '../domain/cycle.ts';
+import { assertTransition, enterState, isStage } from '../domain/cycle.ts';
 import { OrviaError } from '../domain/errors.ts';
 import type { PlanId, WorkItemId } from '../domain/ids.ts';
 import { assertPlanAcceptsChanges } from '../domain/plan.ts';
 import type { AgentRun } from '../domain/records.ts';
 import {
   assertWorkItemAcceptsChanges,
+  OPEN_STATUSES,
   transitionWorkItem,
   type WorkItem,
   type WorkItemStatus,
@@ -84,7 +85,7 @@ export function listWorkItems(
 ): WorkItem[] {
   return deps.store.workItems.list({
     ...(input.planId === undefined ? {} : { planId: input.planId }),
-    statuses: input.statuses ?? ['active', 'paused'],
+    statuses: input.statuses ?? OPEN_STATUSES,
   });
 }
 
@@ -137,11 +138,7 @@ export async function bindWorkspace(
         workItemId: item.id,
       });
     }
-    return deps.store.workItems.update(
-      item.id,
-      { workspace: identity, branch: identity.branch },
-      nowIso(deps),
-    );
+    return deps.store.workItems.update(item.id, { workspace: identity }, nowIso(deps));
   });
 }
 
@@ -193,7 +190,11 @@ export async function pauseWorkItem(
         assertTransition(cycle, 'PAUSED');
         deps.store.cycles.update(
           cycle.id,
-          { state: 'PAUSED', reason: 'PAUSED_BY_HUMAN', resumeStage: cycle.state },
+          enterState('PAUSED', {
+            reason: 'PAUSED_BY_HUMAN',
+            from: cycle.state,
+            now: nowIso(deps),
+          }),
           nowIso(deps),
         );
       }
@@ -211,7 +212,7 @@ export async function discoverWorktrees(
   input: { repositoryPath: string },
 ): Promise<DiscoveredWorktree[]> {
   const entries = await deps.git.listWorktrees(input.repositoryPath);
-  const open = deps.store.workItems.list({ statuses: ['active', 'paused'] });
+  const open = deps.store.workItems.list({ statuses: OPEN_STATUSES });
   return entries.map((entry) => ({
     ...entry,
     boundWorkItemIds: open

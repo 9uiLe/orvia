@@ -1,8 +1,8 @@
 import {
   assertTransition,
+  enterState,
   firstStage,
   isStage,
-  resumeStageAfterEscalation,
   resumeTarget,
   type Cycle,
   type CycleMode,
@@ -12,7 +12,7 @@ import {
 } from '../domain/cycle.ts';
 import { isOrviaError, OrviaError } from '../domain/errors.ts';
 import type { CycleId, ReviewId, RunId, WorkItemId } from '../domain/ids.ts';
-import type { AgentRun, RunPurpose } from '../domain/records.ts';
+import type { AgentRun } from '../domain/records.ts';
 import {
   classifyFinding,
   nextAfterReview,
@@ -21,15 +21,12 @@ import {
   type NextStep,
   type Review,
 } from '../domain/review.ts';
-import { assertOperationAllowed } from '../domain/storage.ts';
 import {
   parseFixResult,
   parseImplementationResult,
   parseReviewResult,
   parseVerificationResult,
-  resultJsonSchema,
   ResultProtocolError,
-  type ResultPurpose,
   type VerificationResult,
 } from './agent-results.ts';
 import {
@@ -40,18 +37,16 @@ import {
 } from './cycle-prompts.ts';
 import { nowIso, type Dependencies } from './dependencies.ts';
 import type { ChangeEvidence, CyclePatch, TransactionMode } from './ports.ts';
-import { recoveryIncompleteError, type RunSupervisor, type StageOutput } from './runs.ts';
-import { assertCapable, requireProfile } from './agent-profiles.ts';
-import { IMPLEMENTATION_PROFILE_STAGES, REVIEW_PROFILE_STAGES } from '../domain/agent-profile.ts';
+import { assertAgentWorkAllowed, type RunSupervisor, type StageOutput } from './runs.ts';
+import { assertCapable, assertCommandAvailable, requireProfile } from './agent-profiles.ts';
+import {
+  IMPLEMENTATION_PROFILE_STAGES,
+  profileRoleFor,
+  REVIEW_PROFILE_STAGES,
+} from '../domain/agent-profile.ts';
 import type { StorageService } from './storage.ts';
+import { assertWorkItemCanRun, requireBoundWorkspace } from '../domain/work-item.ts';
 import { requireWorkItem } from './work-items.ts';
-
-/** The stage a waiting cycle goes back to when resumed. */
-function resumeStageFor(target: CycleState, from: StageState): StageState | null {
-  if (target === 'BLOCKED' || target === 'PAUSED') return from;
-  if (target === 'NEEDS_HUMAN') return resumeStageAfterEscalation(from);
-  return null;
-}
 
 class ChangesTooLarge extends Error {}
 
@@ -62,13 +57,6 @@ const START_FAILURE_REASONS: Partial<Record<string, CycleReason>> = {
   AGENT_UNAVAILABLE: 'AGENT_UNAVAILABLE',
   RESULT_STORAGE_EXHAUSTED: 'RESULT_STORAGE_EXHAUSTED',
   STORAGE_HARD_LIMIT: 'STORAGE_HARD_LIMIT',
-};
-
-const PURPOSE: Record<StageState, ResultPurpose> = {
-  IMPLEMENTING: 'implementation',
-  VERIFYING: 'verification',
-  REVIEWING: 'review',
-  FIXING: 'fix',
 };
 
 export interface CycleDetails {
@@ -93,7 +81,7 @@ export class CycleSupervisor {
     this.#deps = deps;
     this.#runs = runs;
     this.#storage = storage;
-    runs.onFinished = (run, output) => this.#onRunFinished(run, output);
+    runs.onFinished((run, output) => this.#onRunFinished(run, output));
   }
 
   async start(input: {
@@ -118,14 +106,7 @@ export class CycleSupervisor {
     // Every stage either profile will run is checked now, before anything starts.
     await this.#assertProfileUsable(implementationProfileId, IMPLEMENTATION_PROFILE_STAGES);
     await this.#assertProfileUsable(reviewProfileId, REVIEW_PROFILE_STAGES);
-    const workspace = requireWorkItem(this.#deps, input.workItemId).workspace;
-    if (workspace === null) {
-      throw new OrviaError(
-        'WORKSPACE_NOT_BOUND',
-        `work item ${input.workItemId} has no bound worktree`,
-        { workItemId: input.workItemId },
-      );
-    }
+    const workspace = requireBoundWorkspace(requireWorkItem(this.#deps, input.workItemId));
     const baseRef = input.baseRef ?? 'HEAD';
     const baseCommit = await this.#deps.git.resolveCommit(workspace.worktreeRoot, baseRef);
     if (baseCommit === null) {
@@ -137,16 +118,8 @@ export class CycleSupervisor {
     const stage = firstStage(input.mode);
     const cycle = store.transaction(() => {
       const item = requireWorkItem(this.#deps, input.workItemId);
-      if (item.status !== 'active') {
-        throw new OrviaError('INVALID_STATE_TRANSITION', `work item ${item.id} is ${item.status}`, {
-          workItemId: item.id,
-        });
-      }
-      if (item.workspace === null) {
-        throw new OrviaError('WORKSPACE_NOT_BOUND', `work item ${item.id} has no bound worktree`, {
-          workItemId: item.id,
-        });
-      }
+      assertWorkItemCanRun(item);
+      requireBoundWorkspace(item);
       const active = store.cycles.active(item.id);
       if (active !== null) {
         throw new OrviaError(
@@ -195,13 +168,7 @@ export class CycleSupervisor {
   async #assertProfileUsable(profileId: string, stages: readonly StageState[]): Promise<void> {
     const profile = requireProfile(this.#deps.profiles, profileId);
     for (const stage of stages) assertCapable(profile, stage);
-    if ((await this.#deps.launcher.resolveCommand(profile.command)) === null) {
-      throw new OrviaError(
-        'AGENT_UNAVAILABLE',
-        `agent profile ${profile.id}: command not found: ${profile.command}`,
-        { profileId: profile.id, command: profile.command },
-      );
-    }
+    await assertCommandAvailable(profile, this.#deps.launcher);
   }
 
   get(input: { cycleId: CycleId }): CycleDetails {
@@ -253,7 +220,11 @@ export class CycleSupervisor {
           { cycleId: cycle.id, state: cycle.state },
         );
       }
-      return { state: 'PAUSED', reason: 'PAUSED_BY_HUMAN', resumeStage: cycle.state };
+      return enterState('PAUSED', {
+        reason: 'PAUSED_BY_HUMAN',
+        from: cycle.state,
+        now: nowIso(this.#deps),
+      });
     });
   }
   /**
@@ -264,19 +235,11 @@ export class CycleSupervisor {
     const cycle = this.#require(input.cycleId);
     const target = resumeTarget(cycle);
     const item = requireWorkItem(this.#deps, cycle.workItemId);
-    if (item.status !== 'active') {
-      throw new OrviaError(
-        'INVALID_STATE_TRANSITION',
-        `work item ${item.id} is ${item.status}; resume the work item first`,
-        { workItemId: item.id },
-      );
-    }
+    assertWorkItemCanRun(item);
     const resumed = this.#commit(cycle.id, 'write', (fresh) =>
       fresh.state === cycle.state
         ? {
-            state: target,
-            reason: null,
-            resumeStage: null,
+            ...enterState(target, { now: nowIso(this.#deps) }),
             // A human looked at the cycle; the automatic-fix budget starts again.
             ...(fresh.state === 'NEEDS_HUMAN' ? { autoFixRounds: 0 } : {}),
           }
@@ -294,7 +257,7 @@ export class CycleSupervisor {
   async cancel(input: { cycleId: CycleId }): Promise<Cycle> {
     return this.#stopAndCommit(input.cycleId, (cycle) => {
       assertTransition(cycle, 'CANCELLED');
-      return { state: 'CANCELLED', reason: 'CANCELLED_BY_HUMAN', completedAt: nowIso(this.#deps) };
+      return enterState('CANCELLED', { reason: 'CANCELLED_BY_HUMAN', now: nowIso(this.#deps) });
     });
   }
 
@@ -329,7 +292,11 @@ export class CycleSupervisor {
       if (!isStage(cycle.state)) continue;
       const updated = this.#commit(cycle.id, 'reserve', (fresh) =>
         isStage(fresh.state)
-          ? { state: 'BLOCKED', reason: 'RUN_INTERRUPTED', resumeStage: fresh.state }
+          ? enterState('BLOCKED', {
+              reason: 'RUN_INTERRUPTED',
+              from: fresh.state,
+              now: nowIso(this.#deps),
+            })
           : null,
       );
       if (updated !== null) blocked.push(cycle.id);
@@ -392,7 +359,7 @@ export class CycleSupervisor {
       );
       return;
     }
-    if (next.state === 'FIXING' || next.state === 'REVIEWING' || next.state === 'VERIFYING') {
+    if (isStage(next.state)) {
       const advanced = this.#require(cycle.id);
       if (advanced.state === next.state) await this.#launchOrBlock(advanced, next.state, false);
     }
@@ -494,11 +461,12 @@ export class CycleSupervisor {
         cycle.id,
         {
           ...extra,
-          state: target,
-          reason: 'reason' in next ? next.reason : null,
-          resumeStage: resumeStageFor(target, fresh.state as StageState),
+          ...enterState(target, {
+            ...('reason' in next ? { reason: next.reason } : {}),
+            from: fresh.state as StageState,
+            now: nowIso(this.#deps),
+          }),
           ...(target === 'FIXING' ? { autoFixRounds: fresh.autoFixRounds + 1 } : {}),
-          ...(target === 'HUMAN_REVIEW_READY' ? { completedAt: nowIso(this.#deps) } : {}),
         },
         nowIso(this.#deps),
       );
@@ -509,12 +477,7 @@ export class CycleSupervisor {
   #stop(cycle: Cycle, runId: RunId, state: 'BLOCKED' | 'FAILED', reason: CycleReason): void {
     this.#commit(cycle.id, 'reserve', (fresh) =>
       fresh.currentRunId === runId && isStage(fresh.state)
-        ? {
-            state,
-            reason,
-            resumeStage: resumeStageFor(state, fresh.state),
-            ...(state === 'FAILED' ? { completedAt: nowIso(this.#deps) } : {}),
-          }
+        ? enterState(state, { reason, from: fresh.state, now: nowIso(this.#deps) })
         : null,
     );
   }
@@ -543,17 +506,18 @@ export class CycleSupervisor {
    */
   async #launchOrBlock(cycle: Cycle, stage: StageState, rethrow: boolean): Promise<void> {
     try {
-      if (this.#runs.recoveryStatus().state === 'incomplete') {
-        throw recoveryIncompleteError(this.#runs.recoveryStatus(), 'cycle stage');
-      }
-      assertOperationAllowed(await this.#storage.assess(), 'agent_run');
+      await assertAgentWorkAllowed(this.#runs, this.#storage, 'cycle stage', 'agent_run');
       await this.#launch(cycle, stage);
     } catch (error) {
       if (error instanceof ChangesTooLarge) {
         // Reviewing part of a change could pass what was not seen; a human decides instead.
         this.#commit(cycle.id, 'reserve', (fresh) =>
           fresh.state === stage
-            ? { state: 'NEEDS_HUMAN', reason: 'CHANGES_TOO_LARGE', resumeStage: stage }
+            ? enterState('NEEDS_HUMAN', {
+                reason: 'CHANGES_TOO_LARGE',
+                from: stage,
+                now: nowIso(this.#deps),
+              })
             : null,
         );
         return;
@@ -562,11 +526,11 @@ export class CycleSupervisor {
       this.#deps.logger.warn('cycle stage could not start', { cycleId: cycle.id, stage, code });
       this.#commit(cycle.id, 'reserve', (fresh) =>
         fresh.state === stage
-          ? {
-              state: 'BLOCKED',
+          ? enterState('BLOCKED', {
               reason: START_FAILURE_REASONS[code] ?? 'START_FAILED',
-              resumeStage: stage,
-            }
+              from: stage,
+              now: nowIso(this.#deps),
+            })
           : null,
       );
       if (rethrow) {
@@ -578,16 +542,15 @@ export class CycleSupervisor {
   }
 
   async #launch(cycle: Cycle, stage: StageState): Promise<void> {
-    const purpose = PURPOSE[stage];
     const instructions = await this.#instructions(cycle, stage);
     await this.#runs.start({
       workItemId: cycle.workItemId,
-      profileId: stage === 'REVIEWING' ? cycle.reviewProfileId : cycle.implementationProfileId,
-      instructions,
-      purpose: purpose satisfies RunPurpose,
+      kind: 'cycleStage',
       cycleId: cycle.id,
       stage,
-      resultSchema: resultJsonSchema(purpose),
+      profileId:
+        profileRoleFor(stage) === 'review' ? cycle.reviewProfileId : cycle.implementationProfileId,
+      instructions,
       // A pause or cancel may have landed while the launch was being prepared.
       withinTransaction: (run) => {
         const fresh = this.#deps.store.cycles.get(cycle.id);
@@ -603,12 +566,7 @@ export class CycleSupervisor {
 
   /** The cycle's changes as git reports them, collected by Orvia rather than the reviewer. */
   async #changeEvidence(cycle: Cycle): Promise<ChangeEvidence> {
-    const workspace = requireWorkItem(this.#deps, cycle.workItemId).workspace;
-    if (workspace === null) {
-      throw new OrviaError('WORKSPACE_NOT_BOUND', `work item ${cycle.workItemId} has no worktree`, {
-        workItemId: cycle.workItemId,
-      });
-    }
+    const workspace = requireBoundWorkspace(requireWorkItem(this.#deps, cycle.workItemId));
     const evidence = await this.#deps.git.changes(
       workspace.worktreeRoot,
       cycle.baseCommit,

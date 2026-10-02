@@ -13,7 +13,11 @@ import {
   assertTransition,
   canTransition,
   CYCLE_STATES,
+  enterState,
   firstStage,
+  isStage,
+  TERMINAL_STATES,
+  WAITING_STATES,
   resumeStageAfterEscalation,
   resumeTarget,
   type CycleState,
@@ -54,6 +58,50 @@ const ALLOWED: Record<CycleState, CycleState[]> = {
   FAILED: [],
   CANCELLED: [],
 };
+
+describe('state-dependent cycle fields', () => {
+  const now = '2026-01-01T00:00:00.000Z';
+
+  for (const state of CYCLE_STATES) {
+    test(`entering ${state} sets reason, resumeStage, and completedAt consistently`, () => {
+      const patch = enterState(state, { reason: 'RUN_FAILED', from: 'FIXING', now });
+      assert.equal(patch.state, state);
+      if (isStage(state)) {
+        assert.deepEqual(patch, { state, reason: null, resumeStage: null, completedAt: null });
+      } else if ((TERMINAL_STATES as readonly CycleState[]).includes(state)) {
+        assert.deepEqual(patch, {
+          state,
+          reason: 'RUN_FAILED',
+          resumeStage: null,
+          completedAt: now,
+        });
+      } else {
+        assert.equal(patch.reason, 'RUN_FAILED');
+        assert.notEqual(patch.resumeStage, null);
+        assert.equal(patch.completedAt, null);
+      }
+    });
+  }
+
+  test('a cycle waiting for a human resumes where the escalation says; pause and block resume the same stage', () => {
+    for (const stage of ['IMPLEMENTING', 'VERIFYING', 'REVIEWING', 'FIXING'] as const) {
+      assert.equal(
+        enterState('NEEDS_HUMAN', { reason: 'FIX_DISPUTED', from: stage, now }).resumeStage,
+        resumeStageAfterEscalation(stage),
+      );
+      for (const waiting of ['PAUSED', 'BLOCKED'] as const) {
+        assert.equal(enterState(waiting, { from: stage, now }).resumeStage, stage);
+      }
+    }
+  });
+
+  test('a terminal state without a reason has none, and a waiting state needs the stage it left', () => {
+    assert.equal(enterState('HUMAN_REVIEW_READY', { now }).reason, null);
+    for (const waiting of WAITING_STATES) {
+      assert.throws(() => enterState(waiting, { now }), { code: 'INTERNAL' });
+    }
+  });
+});
 
 describe('cycle state machine', () => {
   for (const from of CYCLE_STATES) {

@@ -87,6 +87,19 @@ export function assertCapable(profile: AgentProfile, stage: StageState): void {
   }
 }
 
+export async function assertCommandAvailable(
+  profile: AgentProfile,
+  launcher: ProcessLauncher,
+): Promise<void> {
+  if ((await launcher.resolveCommand(profile.command)) === null) {
+    throw new OrviaError(
+      'AGENT_UNAVAILABLE',
+      `agent profile ${profile.id}: command not found: ${profile.command}`,
+      { profileId: profile.id, command: profile.command },
+    );
+  }
+}
+
 export interface AgentProfileView {
   readonly id: string;
   readonly adapter: string;

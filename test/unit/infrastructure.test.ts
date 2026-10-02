@@ -29,6 +29,38 @@ describe('configuration', () => {
     assert.equal(config.log_level, 'info');
     assert.equal(config.agents.termination_grace_ms, 10_000);
     assert.equal(config.agents.kill_confirmation_ms, 5_000);
+    assert.deepEqual(config.agents.profiles, {
+      codex: { adapter: 'codex' },
+      claude: { adapter: 'claude' },
+    });
+    assert.deepEqual(config.orchestration, {
+      max_review_fix_cycles: 3,
+      max_review_diff_kb: 256,
+    });
+  });
+
+  test('default profiles must name a configured profile', () => {
+    const profiles = { primary: { adapter: 'codex' } };
+    assert.equal(
+      validateConfig(
+        {
+          agents: { profiles },
+          orchestration: {
+            default_implementation_profile: 'primary',
+            default_review_profile: 'primary',
+          },
+        },
+        'test',
+      ).orchestration.default_review_profile,
+      'primary',
+    );
+    for (const key of ['default_implementation_profile', 'default_review_profile']) {
+      assert.throws(
+        () => validateConfig({ agents: { profiles }, orchestration: { [key]: 'missing' } }, 'test'),
+        { code: 'CONFIG_INVALID' },
+        key,
+      );
+    }
   });
 
   test('invalid values are rejected', () => {
@@ -39,6 +71,8 @@ describe('configuration', () => {
       '{"storage": {"pressure_percent": 95, "warning_percent": 90}}',
       '{"storage": {"unknown_key": 1}}',
       '{"log_level": "verbose"}',
+      '{"agents": {"profiles": {"Not_Valid": {"adapter": "codex"}}}}',
+      '{"agents": {"profiles": {"1st": {"adapter": "codex"}}}}',
       '[]',
       'not json at all {',
     ]) {
@@ -150,16 +184,21 @@ describe('operation registry', () => {
   });
 
   test('every Work Item mutation requires an explicit workItemId', () => {
-    for (const name of [
-      'start_run',
-      'pause_work_item',
-      'resume_work_item',
-      'submit_feedback',
-      'bind_workspace',
-    ]) {
-      const operation = OPERATIONS.find((candidate) => candidate.name === name);
-      const schema = z.toJSONSchema(operation?.input ?? z.object({})) as { required?: string[] };
-      assert.ok(schema.required?.includes('workItemId'), name);
+    // An operation that also takes a planId may scope itself to the Plan instead of one item.
+    const mutations = OPERATIONS.filter((operation) => {
+      const { properties } = z.toJSONSchema(operation.input) as {
+        properties: Record<string, unknown>;
+      };
+      return (
+        operation.operationClass !== 'read' &&
+        'workItemId' in properties &&
+        !('planId' in properties)
+      );
+    });
+    assert.ok(mutations.length > 0);
+    for (const operation of mutations) {
+      const schema = z.toJSONSchema(operation.input) as { required?: string[] };
+      assert.ok(schema.required?.includes('workItemId'), operation.name);
     }
   });
 });

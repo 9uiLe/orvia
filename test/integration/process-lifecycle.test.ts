@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { afterEach, beforeEach, describe, test } from 'node:test';
-import type { Logger, ProcessLauncher } from '../../src/application/ports.ts';
+import type { AgentInvocation, Logger, ProcessLauncher } from '../../src/application/ports.ts';
 import { OrviaError } from '../../src/domain/errors.ts';
 import type { AgentRun } from '../../src/domain/records.ts';
 import type { WorkItem } from '../../src/domain/work-item.ts';
@@ -11,6 +11,7 @@ import type { Daemon } from '../../src/interface/daemon/daemon.ts';
 import { call, FakeAgent, rejectsWith, startTestDaemon } from '../helpers/app.ts';
 import { config, makeTestEnv, silentLogger, type TestEnv } from '../helpers/env.ts';
 import { addWorktree, createRepository } from '../helpers/git.ts';
+import { NodeProcessLauncher } from '../../src/infrastructure/agents/process-launcher.ts';
 
 // Process-group termination is guaranteed on macOS and Linux only (ADR 0008).
 const posix = process.platform !== 'win32';
@@ -202,5 +203,74 @@ describe('agent process lifecycle', { skip: !posix && 'POSIX process groups only
       'shutdown recorded the final state itself; startup recovery had nothing to do',
     );
     assert.equal((await state(restarted, run.id)).run, 'interrupted');
+  });
+
+  test('when launching the agent throws, the run is failed and the Work Item can run again', async () => {
+    let failLaunch = true;
+    const launcher: ProcessLauncher = {
+      resolveCommand: (command) => Promise.resolve(command),
+      launch: () => {
+        if (failLaunch) throw new Error('spawn exploded');
+        return {
+          exited: Promise.resolve({
+            exitCode: 0,
+            signal: null,
+            spawnError: null,
+            leftoverError: null,
+          }),
+          terminate: () => Promise.resolve(),
+        };
+      },
+    };
+    const d = await start({ launcher });
+    await setup(d);
+
+    await assert.rejects(runAgent(d), /spawn exploded/);
+    const { runs } = await call<{ runs: AgentRun[] }>(d.app, 'get_work_item', {
+      workItemId: item.id,
+    });
+    assert.deepEqual(
+      runs.map((run) => run.status),
+      ['failed'],
+    );
+    assert.equal(d.app.runs.activeRunCount(), 0);
+    await call(d.app, 'pause_work_item', { workItemId: item.id });
+    await call(d.app, 'resume_work_item', { workItemId: item.id });
+
+    failLaunch = false;
+    const next = await runAgent(d);
+    await d.app.runs.waitForRun(next.id);
+    assert.equal((await state(d, next.id)).run, 'succeeded');
+  });
+
+  test('when the process group cannot be confirmed gone, termination escalates to SIGKILL and fails', async () => {
+    const calls: [number, NodeJS.Signals | 0][] = [];
+    const policy = { graceMs: 60, killConfirmationMs: 60 };
+    const launcher = new NodeProcessLauncher(policy, (target, signal) => {
+      calls.push([target, signal]);
+    });
+    const invocation: AgentInvocation = {
+      command: process.execPath,
+      args: ['-e', 'setTimeout(() => {}, 60000)'],
+      cwd: env.root,
+      stdin: '',
+    };
+    const running = launcher.launch(invocation, () => undefined);
+    const started = Date.now();
+    try {
+      await rejectsWith(running.terminate(), 'AGENT_TERMINATION_FAILED');
+      assert.ok(
+        Date.now() - started >= policy.graceMs + policy.killConfirmationMs,
+        'waited for the grace period and then for kill confirmation',
+      );
+      const signals = calls.map(([, signal]) => signal).filter((signal) => signal !== 0);
+      assert.deepEqual(signals, ['SIGTERM', 'SIGKILL']);
+    } finally {
+      // The stub never signalled the real process; stop it so the test leaves nothing behind.
+      const target = calls[0]?.[0];
+      if (target !== undefined) process.kill(target, 'SIGKILL');
+    }
+    const exit = await running.exited;
+    assert.notEqual(exit.leftoverError, null, 'the run reports the processes it could not stop');
   });
 });

@@ -14,6 +14,7 @@ import { MIGRATIONS } from '../../src/infrastructure/sqlite/migrations/index.ts'
 import type { Daemon } from '../../src/interface/daemon/daemon.ts';
 import { call, rejectsWith, startTestDaemon } from '../helpers/app.ts';
 import { config, makeTestEnv, type TestEnv } from '../helpers/env.ts';
+import { fillUntilRefused } from '../helpers/storage-fill.ts';
 import { startStorageSampler, type StoragePeak } from '../helpers/storage-sampler.ts';
 
 const KIB = 1024;
@@ -57,20 +58,6 @@ describe('storage contract: database_max_mb is never exceeded', () => {
     return once;
   }
 
-  async function fillUntilRefused(d: Daemon, size: number): Promise<number> {
-    let written = 0;
-    for (let i = 0; i < 5000; i++) {
-      try {
-        await call(d.app, 'add_context', { planId: 'P-1', body: 'x'.repeat(size) });
-        written++;
-      } catch (error) {
-        assert.equal((error as { code: string }).code, 'STORAGE_HARD_LIMIT');
-        return written;
-      }
-    }
-    throw new Error('writes were never refused');
-  }
-
   function hash(path: string): string {
     return existsSync(path) ? createHash('sha256').update(readFileSync(path)).digest('hex') : '-';
   }
@@ -79,7 +66,7 @@ describe('storage contract: database_max_mb is never exceeded', () => {
     const d = await start(5);
     await call(d.app, 'create_plan', { title: 'P' });
     const peak = await sampler();
-    const written = await fillUntilRefused(d, 64 * KIB);
+    const written = await fillUntilRefused(d.app, 64 * KIB);
     const observed = await peak.stop();
     assert.ok(written > 10, 'the budget was actually used');
     assert.ok(observed.total <= 5 * MIB, `peak ${observed.total}`);
@@ -92,7 +79,7 @@ describe('storage contract: database_max_mb is never exceeded', () => {
     const d = await start(5);
     await call(d.app, 'create_plan', { title: 'P' });
     const peak = await sampler();
-    await fillUntilRefused(d, 64 * KIB);
+    await fillUntilRefused(d.app, 64 * KIB);
     const observed = await peak.stop();
     assert.ok(observed.total <= 5 * MIB, `peak ${observed.total}`);
     const status = await call<{ assessment: { database: { maxCapacityBytes: number } } }>(
@@ -128,6 +115,7 @@ describe('storage contract: database_max_mb is never exceeded', () => {
     assert.ok(observed.total <= 5 * MIB, `peak ${observed.total}`);
     const plan = await call<{ notes: unknown[] }>(d.app, 'get_plan', { planId: 'P-1' });
     assert.deepEqual(plan.notes, []);
+    await call(d.app, 'get_status');
     assert.ok(used() <= before, 'nothing was left behind');
     assert.equal(measureDatabaseFiles(env.paths.databaseFile, env.paths.backupDir).journalBytes, 0);
   });
@@ -296,7 +284,7 @@ describe('storage contract: database_max_mb is never exceeded', () => {
   test('a crash near the limit leaves the database writable and cleanable', async () => {
     const d0 = await start(5);
     await call(d0.app, 'create_plan', { title: 'P' });
-    await fillUntilRefused(d0, 64 * KIB);
+    await fillUntilRefused(d0.app, 64 * KIB);
     await d0.close();
     daemon = null;
 
@@ -642,14 +630,8 @@ describe('storage contract: database_max_mb is never exceeded', () => {
   test('refusals explain the limit and the remedy', async () => {
     const d = await start(5);
     await call(d.app, 'create_plan', { title: 'P' });
-    await fillUntilRefused(d, 64 * KIB);
-    for (let i = 0; i < 2000; i++) {
-      try {
-        await call(d.app, 'add_context', { planId: 'P-1', body: 'x'.repeat(100) });
-      } catch {
-        break;
-      }
-    }
+    await fillUntilRefused(d.app, 64 * KIB);
+    await fillUntilRefused(d.app, 100);
     const error = await rejectsWith(
       call(d.app, 'create_plan', { title: 'more' }),
       'STORAGE_HARD_LIMIT',

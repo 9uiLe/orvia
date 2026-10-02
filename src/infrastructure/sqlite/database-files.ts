@@ -24,7 +24,7 @@ function listFiles(dir: string): string[] {
 
 /**
  * Every file that counts toward `storage.database_max_mb`: the database, its WAL, SHM, and
- * rollback journal (used while migrating), and everything in the backup directory, including
+ * rollback journal (used by every write transaction), and everything in the backup directory, including
  * partial backups.
  */
 export function measureDatabaseFiles(databasePath: string, backupDir: string): DatabaseUsage {
@@ -35,6 +35,15 @@ export function measureDatabaseFiles(databasePath: string, backupDir: string): D
     journalBytes: sizeOf(`${databasePath}-journal`),
     backupBytes: listFiles(backupDir).reduce((sum, path) => sum + sizeOf(path), 0),
   };
+}
+
+/** Budgeted bytes other than the main database file, which the page caps are computed around. */
+export function otherBudgetedBytes(
+  usage: DatabaseUsage,
+  options: { readonly includeJournal: boolean } = { includeJournal: true },
+): number {
+  const journalBytes = options.includeJournal ? usage.journalBytes : 0;
+  return usage.backupBytes + usage.walBytes + usage.shmBytes + journalBytes;
 }
 
 export class SqliteDatabaseFiles implements DatabaseFiles {

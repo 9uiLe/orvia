@@ -8,9 +8,11 @@ import {
   databaseUsedBytes,
   JOURNAL_HEADER_BYTES,
   JOURNAL_RECORD_OVERHEAD_BYTES,
+  journalPerPageBytes,
+  requiredBytesForPages,
   type DatabaseUsage,
 } from '../../domain/storage.ts';
-import { measureDatabaseFiles } from './database-files.ts';
+import { measureDatabaseFiles, otherBudgetedBytes } from './database-files.ts';
 
 export interface Migration {
   readonly version: number;
@@ -196,10 +198,8 @@ export function planMigrationStorage(input: {
   readonly budgetBytes: number;
 }): MigrationStoragePlan {
   const { usage, pageSize } = input;
-  const perPage = 2 * pageSize + JOURNAL_RECORD_OVERHEAD_BYTES;
   const newBackupBytes = input.needsBackup ? (input.pageCount - input.freelistCount) * pageSize : 0;
-  const fixedBytes =
-    usage.backupBytes + newBackupBytes + usage.walBytes + usage.shmBytes + usage.journalBytes;
+  const fixedBytes = otherBudgetedBytes(usage) + newBackupBytes;
   const capacity = databaseCapacity({
     budgetBytes: input.budgetBytes,
     fixedBytes,
@@ -208,8 +208,12 @@ export function planMigrationStorage(input: {
   });
   const reservePages = capacity.maxPages - capacity.writeMaxPages;
   const neededPages = input.pageCount + Math.ceil(input.headroomBytes / pageSize);
-  const estimatedRequiredTotalBytes =
-    (neededPages + reservePages) * perPage + JOURNAL_HEADER_BYTES + fixedBytes;
+  const estimatedRequiredTotalBytes = requiredBytesForPages({
+    pages: neededPages,
+    reservePages,
+    pageSize,
+    fixedBytes,
+  });
   const currentUsageBytes = databaseUsedBytes(usage);
   return {
     configuredLimitBytes: input.budgetBytes,
@@ -219,7 +223,7 @@ export function planMigrationStorage(input: {
       JOURNAL_HEADER_BYTES + neededPages * (pageSize + JOURNAL_RECORD_OVERHEAD_BYTES),
     newBackupBytes,
     existingBackupBytes: usage.backupBytes,
-    reserveBytes: reservePages * perPage,
+    reserveBytes: reservePages * journalPerPageBytes(pageSize),
     estimatedRequiredTotalBytes,
     requiredAdditionalBytes: Math.max(0, estimatedRequiredTotalBytes - currentUsageBytes),
     maxPageCount: capacity.maxPages,
@@ -256,7 +260,7 @@ function assertReserveAfterMigration(
   const btreeCount = countSchemaBtrees(db);
   const usage = measureDatabaseFiles(context.databasePath, context.backupDir);
   // The journal belongs to this transaction and is truncated at commit.
-  const fixedBytes = usage.backupBytes + usage.walBytes + usage.shmBytes;
+  const fixedBytes = otherBudgetedBytes(usage, { includeJournal: false });
   const capacity = databaseCapacity({
     budgetBytes: context.budgetBytes,
     fixedBytes,
@@ -264,10 +268,13 @@ function assertReserveAfterMigration(
     btreeCount,
   });
   if (pageCount <= capacity.writeMaxPages) return;
-  const perPage = 2 * pageSize + JOURNAL_RECORD_OVERHEAD_BYTES;
   const reservePages = capacity.maxPages - capacity.writeMaxPages;
-  const estimatedRequiredTotalBytes =
-    (pageCount + reservePages) * perPage + JOURNAL_HEADER_BYTES + fixedBytes;
+  const estimatedRequiredTotalBytes = requiredBytesForPages({
+    pages: pageCount,
+    reservePages,
+    pageSize,
+    fixedBytes,
+  });
   throw new OrviaError(
     'MIGRATION_STORAGE_REQUIRED',
     `migration v${migration.version} (${migration.name}) leaves no room for the control reserve ` +

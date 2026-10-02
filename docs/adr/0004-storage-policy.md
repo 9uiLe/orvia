@@ -12,16 +12,21 @@ user's disk. Orvia must never risk the user's source code to free its own space.
 
 ### Classification
 
-| Class            | Examples                                                                                   | Where           | Lifetime                                                                                                 |
-| ---------------- | ------------------------------------------------------------------------------------------ | --------------- | -------------------------------------------------------------------------------------------------------- |
-| Durable          | Plans, Work Items (incl. workspace binding, PR URL), decisions, human context and feedback | SQLite          | Never removed automatically                                                                              |
-| Bounded metadata | Agent Run records (status, exit code, output reference)                                    | SQLite          | The newest `max_completed_runs_per_work_item` finished runs per Work Item; running runs are never pruned |
-| Reconstructible  | git diffs, source scans, repository snapshots, build details                               | Not stored      | Recomputed from git when needed                                                                          |
-| Ephemeral        | Agent stdout/stderr                                                                        | Cache directory | `retention_days`, and evicted oldest-first under pressure                                                |
+| Class            | Examples                                                                                                                       | Where           | Lifetime                                                                                                 |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------ | --------------- | -------------------------------------------------------------------------------------------------------- |
+| Durable          | Plans, Work Items (incl. workspace binding, PR URL), decisions, human context and feedback, cycles, reviews and their findings | SQLite          | Never removed automatically                                                                              |
+| Bounded metadata | Agent Run records (status, exit code, output reference, a cycle stage's validated result)                                      | SQLite          | The newest `max_completed_runs_per_work_item` finished runs per Work Item; running runs are never pruned |
+| Reconstructible  | git diffs, source scans, repository snapshots, build details                                                                   | Not stored      | Recomputed from git when needed                                                                          |
+| Ephemeral        | Agent stdout/stderr, raw structured output, result schemas                                                                     | Cache directory | `retention_days`, and evicted oldest-first under pressure                                                |
 
-Prompts are passed to agents on stdin and never written to disk. Large text (agent output,
-diffs, source) is never stored in SQLite; run records keep only a cache reference and byte
-counts.
+Prompts are passed to agents on stdin and never written to disk. Agent output, diffs, and source
+are never stored in SQLite; run records keep a cache reference and byte counts. The one piece of
+agent output that reaches SQLite is a cycle stage's structured result, after it has been parsed
+and validated. Its fields are bounded by `RESULT_LIMITS` in `src/application/agent-results.ts`
+(summary, findings, titles, details, evidence, commands, paths, and messages each have a length or
+count limit; ADR 0010). A result beyond a limit is rejected, never truncated, and the cycle
+blocks. The raw structured output and the result schema sent to the agent stay in the cache.
+Reviews and findings are durable and size-limited by the same constants.
 
 ### Limits and defaults
 
@@ -49,9 +54,13 @@ two thresholds were chosen by the maintainer. None of them is derived from measu
 For scale, the benchmark data set (100 Plans, 500 Work Items, 100 decisions, 100 notes)
 measured 151,552 bytes after cleanup on 2026-10-02. Revisit the defaults when real usage data exists.
 
-Validation rejects unknown keys, non-integers, non-positive values, thresholds outside 1–99,
-`pressure_percent >= warning_percent`, and a database limit that does not exceed the maintenance
-reserve.
+Validation rejects unknown keys, non-integers, non-positive values, thresholds outside 1–99, and
+`pressure_percent >= warning_percent`. It does not compare `database_max_mb` with the maintenance
+reserve, because the reserve depends on the schema's b-tree count
+([ADR 0009](0009-storage-contract.md)). A limit too small for the reserve passes validation and
+makes a migration fail: the daemon, which applies pending migrations (including the first creation
+of the database) at startup, refuses to start with `MIGRATION_STORAGE_REQUIRED` and the migration
+is rolled back.
 
 ### Pressure levels
 

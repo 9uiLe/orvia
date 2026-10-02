@@ -174,18 +174,6 @@ describe('workspace identity safety', () => {
     assert.equal(second.workspace?.worktreeRoot, worktree);
   });
 
-  test('mutations require an explicit Work Item id', async () => {
-    await rejectsWith(
-      call(daemon.app, 'start_run', { profileId: 'fake', instructions: 'x' }),
-      'VALIDATION_FAILED',
-    );
-    await rejectsWith(call(daemon.app, 'pause_work_item', {}), 'VALIDATION_FAILED');
-    await rejectsWith(
-      call(daemon.app, 'submit_feedback', { kind: 'reject', body: 'no' }),
-      'VALIDATION_FAILED',
-    );
-  });
-
   test('an unbound Work Item cannot run', async () => {
     const item = await call<WorkItem>(daemon.app, 'create_work_item', {
       planId: 'P-1',

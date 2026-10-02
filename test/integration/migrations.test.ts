@@ -15,10 +15,29 @@ import {
   type Migration,
 } from '../../src/infrastructure/sqlite/migrator.ts';
 import { MIGRATIONS } from '../../src/infrastructure/sqlite/migrations/index.ts';
+import { initial } from '../../src/infrastructure/sqlite/migrations/0001_initial.ts';
 import { orchestration } from '../../src/infrastructure/sqlite/migrations/0002_orchestration.ts';
-import { CYCLE_MODES, CYCLE_REASONS, CYCLE_STATES, STAGE_STATES } from '../../src/domain/cycle.ts';
-import { RUN_PURPOSES } from '../../src/domain/records.ts';
-import { FINDING_CATEGORIES, POLICY_REASONS } from '../../src/domain/review.ts';
+import {
+  CYCLE_MODES,
+  CYCLE_REASONS,
+  CYCLE_STATES,
+  STAGE_STATES,
+  TERMINAL_STATES,
+} from '../../src/domain/cycle.ts';
+import { PLAN_STATUSES } from '../../src/domain/plan.ts';
+import {
+  DECISION_STATUSES,
+  NOTE_KINDS,
+  RUN_PURPOSES,
+  RUN_STATUSES,
+} from '../../src/domain/records.ts';
+import {
+  FINDING_CATEGORIES,
+  POLICY_ACTIONS,
+  POLICY_REASONS,
+  REVIEW_VERDICTS,
+} from '../../src/domain/review.ts';
+import { isOpen, WORK_ITEM_STATUSES } from '../../src/domain/work-item.ts';
 import { call, rejectsWith, startTestDaemon } from '../helpers/app.ts';
 import { ManualClock, makeTestEnv, type TestEnv } from '../helpers/env.ts';
 
@@ -213,25 +232,59 @@ describe('database migrations', () => {
     }
   });
 
-  test('0002 allows every value the domain defines, and only those', () => {
-    // The migration is frozen SQL; a value added to the domain later needs a new migration.
-    const checks: [string, readonly string[]][] = [
-      ['state', CYCLE_STATES],
-      ['reason', CYCLE_REASONS],
-      ['resume_stage', STAGE_STATES],
-      ['mode', CYCLE_MODES],
-      ['purpose', RUN_PURPOSES],
-      ['category', FINDING_CATEGORIES],
-      ['policy_reason', POLICY_REASONS],
+  function quotedValues(list: string): string[] {
+    return list.split(',').map((value) => value.trim().replace(/'/g, ''));
+  }
+
+  function checkedValues(sql: string, table: string, column: string): string[] {
+    const body = new RegExp(`CREATE TABLE ${table} \\(([\\s\\S]*?)\\n\\)`).exec(sql)?.[1];
+    assert.ok(body !== undefined, table);
+    const match = new RegExp(`${column} [^,]*?CHECK \\(${column} IN \\(([^)]*)\\)\\)`).exec(body);
+    assert.ok(match?.[1] !== undefined, `${table}.${column}`);
+    return quotedValues(match[1]);
+  }
+
+  function indexPredicateValues(sql: string, index: string, column: string): string[] {
+    const match = new RegExp(
+      `CREATE UNIQUE INDEX ${index} ON [^;]*?WHERE [^;]*?${column} (?:NOT )?IN \\(([^)]*)\\)`,
+    ).exec(sql);
+    assert.ok(match?.[1] !== undefined, index);
+    return quotedValues(match[1]);
+  }
+
+  test('0001 and 0002 allow every value the domain defines, and only those', () => {
+    // The migrations are frozen SQL; a value added to the domain later needs a new migration.
+    const checks: [string, string, string, readonly string[]][] = [
+      [initial.sql, 'plans', 'status', PLAN_STATUSES],
+      [initial.sql, 'work_items', 'status', WORK_ITEM_STATUSES],
+      [initial.sql, 'runs', 'status', RUN_STATUSES],
+      [initial.sql, 'decisions', 'status', DECISION_STATUSES],
+      [initial.sql, 'notes', 'kind', NOTE_KINDS],
+      [orchestration.sql, 'cycles', 'state', CYCLE_STATES],
+      [orchestration.sql, 'cycles', 'reason', CYCLE_REASONS],
+      [orchestration.sql, 'cycles', 'resume_stage', STAGE_STATES],
+      [orchestration.sql, 'cycles', 'mode', CYCLE_MODES],
+      [orchestration.sql, 'reviews', 'verdict', REVIEW_VERDICTS],
+      [orchestration.sql, 'review_findings', 'category', FINDING_CATEGORIES],
+      [orchestration.sql, 'review_findings', 'policy_action', POLICY_ACTIONS],
+      [orchestration.sql, 'review_findings', 'policy_reason', POLICY_REASONS],
     ];
-    for (const [column, values] of checks) {
-      const match = new RegExp(`CHECK \\(${column} IN \\(([^)]*)\\)\\)`).exec(orchestration.sql);
-      assert.ok(match?.[1] !== undefined, column);
-      assert.deepEqual(
-        match[1].split(',').map((value) => value.trim().replace(/'/g, '')),
-        [...values],
-        column,
-      );
+    for (const [sql, table, column, values] of checks) {
+      assert.deepEqual(checkedValues(sql, table, column), [...values], `${table}.${column}`);
+    }
+    const purpose = /CHECK \(purpose IN \(([^)]*)\)\)/.exec(orchestration.sql);
+    assert.ok(purpose?.[1] !== undefined, 'runs.purpose');
+    assert.deepEqual(quotedValues(purpose[1]), [...RUN_PURPOSES], 'runs.purpose');
+  });
+
+  test('unique-index predicates agree with the domain', () => {
+    assert.deepEqual(
+      indexPredicateValues(orchestration.sql, 'cycles_one_active_per_work_item', 'state'),
+      [...TERMINAL_STATES],
+    );
+    const open = WORK_ITEM_STATUSES.filter(isOpen);
+    for (const index of ['work_items_one_open_per_worktree', 'work_items_one_open_per_branch']) {
+      assert.deepEqual(indexPredicateValues(initial.sql, index, 'status'), open, index);
     }
   });
 

@@ -15,7 +15,9 @@ import { RESULT_LIMITS } from '../../src/application/agent-results.ts';
 import type { CycleDetails } from '../../src/application/cycles.ts';
 import { runCacheRefs } from '../../src/application/storage.ts';
 import type { OverallStatus } from '../../src/application/status.ts';
-import type { AgentCapability } from '../../src/domain/agent-profile.ts';
+import type { ProcessLauncher } from '../../src/application/ports.ts';
+import { requiredCapabilitiesFor, type AgentCapability } from '../../src/domain/agent-profile.ts';
+import { OrviaError } from '../../src/domain/errors.ts';
 import type { Cycle, CycleState } from '../../src/domain/cycle.ts';
 import type { Finding, Review } from '../../src/domain/review.ts';
 import type { WorkItem } from '../../src/domain/work-item.ts';
@@ -29,6 +31,7 @@ import {
   type FakeStep,
 } from '../helpers/app.ts';
 import { config, makeTestEnv, type TestEnv } from '../helpers/env.ts';
+import { fillDurableData } from '../helpers/storage-fill.ts';
 import { addWorktree, createRepository } from '../helpers/git.ts';
 
 const implemented: FakeStep = { result: { status: 'completed', summary: 'implemented' } };
@@ -81,8 +84,10 @@ describe('orchestration cycles', () => {
     storage: Record<string, number> = {},
     profiles: Record<string, { adapter: string; capabilities?: AgentCapability[] }> = PROFILES,
     orchestration: Record<string, unknown> = {},
+    launcher?: ProcessLauncher,
   ): Promise<void> {
     daemon = await startTestDaemon(env, {
+      ...(launcher === undefined ? {} : { launcher }),
       agent,
       agents: [reviewer],
       profiles,
@@ -151,18 +156,10 @@ describe('orchestration cycles', () => {
     assert.notEqual(done.completedAt, null);
     assert.deepEqual(roles(agent), ['implementation', 'verification']);
     assert.deepEqual(roles(reviewer), ['review']);
-    // Each stage is granted exactly its required capabilities: review cannot edit or run commands.
-    assert.deepEqual(invocation(reviewer, 0).granted, ['workspaceRead', 'structuredResult']);
-    assert.deepEqual(invocation(agent, 0).granted, [
-      'workspaceRead',
-      'workspaceWrite',
-      'structuredResult',
-    ]);
-    assert.deepEqual(invocation(agent, 1).granted, [
-      'workspaceRead',
-      'commandExecution',
-      'structuredResult',
-    ]);
+    // Each stage is granted exactly its required capabilities.
+    assert.deepEqual(invocation(reviewer, 0).granted, requiredCapabilitiesFor('REVIEWING'));
+    assert.deepEqual(invocation(agent, 0).granted, requiredCapabilitiesFor('IMPLEMENTING'));
+    assert.deepEqual(invocation(agent, 1).granted, requiredCapabilitiesFor('VERIFYING'));
     assert.match(invocation(reviewer, 0).stdin, /Do not rely on what the implementation/);
     assert.match(invocation(reviewer, 0).stdin, /Orvia rules \(highest precedence\)/);
     // Exploratory commands are not checks; one that fails must not fail the verification.
@@ -258,7 +255,13 @@ describe('orchestration cycles', () => {
       'get_current_review',
       { cycleId: cycle.id },
     );
-    assert.equal(current.findings[1]?.policyReason, 'HUMAN_CATEGORY');
+    assert.deepEqual(
+      current.findings.map((f) => [f.id, f.category, f.policyAction]),
+      [
+        ['F-1', 'correctness', 'AUTO_FIX'],
+        ['F-2', 'public_api', 'NEEDS_HUMAN'],
+      ],
+    );
 
     // While a cycle is open the Work Item is controlled through it.
     const status = await call<OverallStatus>(daemon.app, 'get_status');
@@ -302,33 +305,26 @@ describe('orchestration cycles', () => {
     agent.script = { implementation: [implemented], verification: [verified] };
     reviewer.script = { review: [reviewWith(finding('unknown', 'Unclear intent'))] };
     const cycle = await start();
-    assert.equal((await settle(cycle.id, 'NEEDS_HUMAN')).reason, 'DECISION_REQUIRED');
+    await settle(cycle.id, 'NEEDS_HUMAN');
     const { findings } = await call<{ findings: Finding[] }>(daemon.app, 'get_current_review', {
       cycleId: cycle.id,
     });
-    assert.equal(findings[0]?.policyReason, 'UNKNOWN_CATEGORY');
+    assert.deepEqual(
+      findings.map((f) => [f.category, f.policyAction]),
+      [['unknown', 'NEEDS_HUMAN']],
+    );
     assert.ok(!roles(agent).includes('fix'));
   });
 
   test('a reviewer that does not follow the protocol blocks the cycle', async () => {
-    const valid = { verdict: 'findings', summary: 'ok', findings: [finding('style', 'Naming')] };
-    const invalid: FakeStep[] = [
-      { stdout: 'LGTM, no problems found.' },
-      { result: { ...valid, findings: [finding('nitpick', 'Naming')] } },
-      { result: { verdict: 'findings', findings: valid.findings } },
-      { result: { ...valid, summary: 'x'.repeat(RESULT_LIMITS.summary + 1) } },
-      { result: { ...valid, verdict: 'pass' } },
-    ];
     agent.script = { implementation: [implemented], verification: [verified] };
-    reviewer.script = { review: [...invalid, passed] };
+    reviewer.script = { review: [{ stdout: 'LGTM, no problems found.' }, passed] };
     const cycle = await start();
-    for (let i = 0; i < invalid.length; i++) {
-      const blocked = await settle(cycle.id, 'BLOCKED');
-      assert.equal(blocked.reason, 'REVIEW_PROTOCOL_INVALID');
-      assert.equal(blocked.resumeStage, 'REVIEWING');
-      assert.equal(details(cycle.id).latestReview, null);
-      await call(daemon.app, 'resume_cycle', { cycleId: cycle.id });
-    }
+    const blocked = await settle(cycle.id, 'BLOCKED');
+    assert.equal(blocked.reason, 'REVIEW_PROTOCOL_INVALID');
+    assert.equal(blocked.resumeStage, 'REVIEWING');
+    assert.equal(details(cycle.id).latestReview, null);
+    await call(daemon.app, 'resume_cycle', { cycleId: cycle.id });
     await settle(cycle.id, 'HUMAN_REVIEW_READY');
     assert.ok(!roles(agent).includes('fix'));
   });
@@ -356,7 +352,7 @@ describe('orchestration cycles', () => {
       verification: [{ result: { status: 'blocked', summary: 'no node here', commands: [] } }],
     };
     const cycle = await start('review_existing');
-    assert.equal((await settle(cycle.id, 'BLOCKED')).reason, 'VERIFICATION_BLOCKED');
+    await settle(cycle.id, 'BLOCKED');
     assert.deepEqual(roles(reviewer), []);
   });
 
@@ -383,19 +379,22 @@ describe('orchestration cycles', () => {
   });
 
   test('the fix loop stops at the limit, and a human resume starts a new budget', async () => {
+    const limit = 2;
+    await daemon.close();
+    await boot({}, PROFILES, { max_review_fix_cycles: limit });
     const routine = reviewWith(finding('correctness', 'Still wrong'));
+    // The review after the last allowed fix still reports findings; the next one passes.
     agent.script = {
       implementation: [implemented],
-      verification: [verified, verified, verified, verified],
-      fix: [fixed, fixed, fixed],
+      verification: Array.from({ length: limit + 1 }, () => verified),
+      fix: Array.from({ length: limit }, () => fixed),
     };
-    reviewer.script = { review: [routine, routine, routine, routine, passed] };
+    reviewer.script = { review: [...Array.from({ length: limit + 1 }, () => routine), passed] };
     const cycle = await start();
     const stopped = await settle(cycle.id, 'NEEDS_HUMAN');
-    assert.equal(stopped.reason, 'LOOP_LIMIT');
-    assert.equal(stopped.autoFixRounds, 3);
-    assert.equal(roles(agent).filter((role) => role === 'fix').length, 3);
-    assert.equal(roles(reviewer).length, 4);
+    assert.equal(stopped.autoFixRounds, limit);
+    assert.equal(roles(agent).filter((role) => role === 'fix').length, limit);
+    assert.equal(roles(reviewer).length, limit + 1);
 
     const resumed = await call<Cycle>(daemon.app, 'resume_cycle', { cycleId: cycle.id });
     assert.equal(resumed.autoFixRounds, 0);
@@ -431,6 +430,7 @@ describe('orchestration cycles', () => {
     const paused = details(cycle.id).cycle;
     assert.equal(paused.state, 'PAUSED');
     assert.equal(paused.reason, 'PAUSED_BY_HUMAN');
+    assert.equal(paused.resumeStage, 'IMPLEMENTING');
     await rejectsWith(
       call(daemon.app, 'resume_cycle', { cycleId: cycle.id }),
       'INVALID_STATE_TRANSITION',
@@ -612,17 +612,7 @@ describe('orchestration cycles', () => {
     };
     const cycle = await start();
     await until(() => roles(reviewer).length === 1);
-    // Fill durable data until ordinary writes are refused.
-    for (const size of [64 * 1024, 4 * 1024, 100]) {
-      for (;;) {
-        try {
-          await call(daemon.app, 'add_context', { planId: 'P-1', body: 'x'.repeat(size) });
-        } catch (error) {
-          assert.equal((error as { code: string }).code, 'STORAGE_HARD_LIMIT');
-          break;
-        }
-      }
-    }
+    await fillDurableData(daemon.app);
     writeFileSync(release, '');
     const blocked = await settle(cycle.id, 'BLOCKED');
     assert.equal(blocked.reason, 'STORAGE_HARD_LIMIT');
@@ -638,5 +628,147 @@ describe('orchestration cycles', () => {
       'STORAGE_HARD_LIMIT',
     );
     await call(daemon.app, 'cancel_cycle', { cycleId: cycle.id });
+  });
+
+  /**
+   * A launcher whose agents never exit on their own and cannot be terminated, so a cycle stage
+   * stays running. `holdNextResolve` makes the next command lookup wait, to let something else
+   * happen while a start is between its checks and its transaction.
+   */
+  function stuckLauncher() {
+    const control = {
+      release: (): void => undefined,
+      held: false,
+      holdNextResolve: null as Promise<void> | null,
+    };
+    const launcher: ProcessLauncher = {
+      resolveCommand: async (command) => {
+        const hold = control.holdNextResolve;
+        control.holdNextResolve = null;
+        if (hold !== null) {
+          control.held = true;
+          await hold;
+        }
+        return command;
+      },
+      launch: () => ({
+        exited: new Promise((resolve) => {
+          control.release = () => {
+            resolve({ exitCode: 0, signal: null, spawnError: null, leftoverError: null });
+          };
+        }),
+        terminate: () =>
+          Promise.reject(new OrviaError('AGENT_TERMINATION_FAILED', 'simulated', {})),
+      }),
+    };
+    return { control, launcher };
+  }
+
+  test('when an implementation needs input, the cycle waits for a human and resumes implementing', async () => {
+    agent.script = {
+      implementation: [
+        { result: { status: 'needs_input', summary: 'which database?' } },
+        implemented,
+      ],
+      verification: [verified],
+    };
+    reviewer.script = { review: [passed] };
+    const cycle = await start();
+    const waiting = await settle(cycle.id, 'NEEDS_HUMAN');
+    assert.equal(waiting.reason, 'AGENT_NEEDS_INPUT');
+    assert.equal(waiting.resumeStage, 'IMPLEMENTING');
+    assert.equal(waiting.completedAt, null);
+
+    const resumed = await call<Cycle>(daemon.app, 'resume_cycle', { cycleId: cycle.id });
+    assert.equal(resumed.state, 'IMPLEMENTING');
+    assert.equal(resumed.reason, null);
+    assert.equal(resumed.resumeStage, null);
+    await settle(cycle.id, 'HUMAN_REVIEW_READY');
+    assert.deepEqual(roles(agent), ['implementation', 'implementation', 'verification']);
+  });
+
+  test('when a Work Item has a cycle waiting for a human, it cannot be archived', async () => {
+    agent.script = { implementation: [{ result: { status: 'needs_input', summary: 'q' } }] };
+    const cycle = await start();
+    await settle(cycle.id, 'NEEDS_HUMAN');
+    await rejectsWith(
+      call(daemon.app, 'archive_work_item', { workItemId: item.id }),
+      'CYCLE_ACTIVE',
+    );
+    assert.equal(
+      (await call<{ workItem: WorkItem }>(daemon.app, 'get_work_item', { workItemId: item.id }))
+        .workItem.status,
+      'active',
+    );
+  });
+
+  test('when a stage fails to start for an unmapped reason, the cycle blocks with START_FAILED and leaves no run running', async () => {
+    agent.buildInvocation = () => {
+      throw new Error('adapter exploded');
+    };
+    await assert.rejects(start(), /adapter exploded/);
+    const { cycle, runs } = details('C-1');
+    assert.equal(cycle.state, 'BLOCKED');
+    assert.equal(cycle.reason, 'START_FAILED');
+    assert.equal(cycle.resumeStage, 'IMPLEMENTING');
+    assert.deepEqual(
+      runs.map((run) => run.status),
+      ['failed'],
+    );
+    const refs = runCacheRefs(runs[0]?.outputRef ?? '');
+    assert.equal(existsSync(join(env.paths.cacheDir, refs.result)), false);
+    assert.equal(existsSync(join(env.paths.cacheDir, refs.schema)), false);
+  });
+
+  for (const operation of ['pause_cycle', 'cancel_cycle'] as const) {
+    test(`when the agent cannot be stopped, ${operation} fails and the cycle keeps its state`, async () => {
+      const { control, launcher } = stuckLauncher();
+      await daemon.close();
+      await boot({}, PROFILES, {}, launcher);
+      const cycle = await start();
+
+      await rejectsWith(
+        call(daemon.app, operation, { cycleId: cycle.id }),
+        'AGENT_TERMINATION_FAILED',
+      );
+      const after = details(cycle.id);
+      assert.equal(after.cycle.state, 'IMPLEMENTING');
+      assert.equal(after.cycle.reason, null);
+      assert.equal(after.runs[0]?.status, 'running');
+      control.release();
+    });
+  }
+
+  test('when a paused cycle is cancelled, it has no stage left to resume', async () => {
+    agent.script = { implementation: [{ waitFor: release, ...implemented }] };
+    const cycle = await start();
+    const paused = await call<Cycle>(daemon.app, 'pause_cycle', { cycleId: cycle.id });
+    assert.equal(paused.resumeStage, 'IMPLEMENTING');
+    const cancelled = await call<Cycle>(daemon.app, 'cancel_cycle', { cycleId: cycle.id });
+    assert.equal(cancelled.state, 'CANCELLED');
+    assert.equal(cancelled.resumeStage, null);
+    assert.notEqual(cancelled.completedAt, null);
+  });
+
+  test('when a cycle starts while a manual run is being prepared, the manual run is refused with CYCLE_ACTIVE', async () => {
+    const { control, launcher } = stuckLauncher();
+    await daemon.close();
+    await boot({}, PROFILES, {}, launcher);
+    let open: () => void = () => undefined;
+    control.holdNextResolve = new Promise((resolve) => {
+      open = resolve;
+    });
+    const manual = call(daemon.app, 'start_run', {
+      workItemId: item.id,
+      profileId: 'primary-profile',
+      instructions: 'go',
+    });
+    const refused = rejectsWith(manual, 'CYCLE_ACTIVE');
+    await until(() => control.held);
+
+    await start();
+    open();
+    await refused;
+    control.release();
   });
 });

@@ -3,11 +3,7 @@ import { after, before, describe, test } from 'node:test';
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import { openDatabase } from '../../src/infrastructure/sqlite/database.ts';
 import { MIGRATIONS } from '../../src/infrastructure/sqlite/migrations/index.ts';
-import {
-  READ_QUERIES,
-  WRITE_STATEMENTS,
-  type ReadQueryName,
-} from '../../src/infrastructure/sqlite/queries.ts';
+import { READ_QUERIES, type ReadQueryName } from '../../src/infrastructure/sqlite/queries.ts';
 import { makeTestEnv, type TestEnv } from '../helpers/env.ts';
 import { mkdirSync } from 'node:fs';
 
@@ -35,6 +31,8 @@ const PARAMS: Record<ReadQueryName, SQLInputValue[]> = {
   getLatestReview: [1],
   listFindingsForReview: [1],
   listRunsForCycle: [1],
+  getFinding: [1],
+  finishedRunsBeyondKeep: [5],
 };
 
 /**
@@ -72,7 +70,8 @@ describe('query plans', () => {
         (detail) =>
           detail.startsWith('SCAN ') &&
           !detail.includes(' USING ') &&
-          !detail.includes('VIRTUAL TABLE'),
+          !detail.includes('VIRTUAL TABLE') &&
+          !detail.startsWith('SCAN (subquery'),
       );
       assert.deepEqual(fullScans, [], `${name}:\n${plan.join('\n')}`);
     });
@@ -86,7 +85,6 @@ describe('query plans', () => {
       ...(Object.keys(READ_QUERIES) as ReadQueryName[]).map(
         (name): [string, string, SQLInputValue[]] => [name, READ_QUERIES[name], PARAMS[name]],
       ),
-      ['finishedRunsBeyondKeep', WRITE_STATEMENTS.finishedRunsBeyondKeep, [5]],
     ];
     const sorting = queries
       .filter(([, sql, params]) =>

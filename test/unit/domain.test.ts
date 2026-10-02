@@ -11,7 +11,14 @@ import {
   type StorageLimits,
   type StorageUsage,
 } from '../../src/domain/storage.ts';
-import { transitionWorkItem, type WorkItem } from '../../src/domain/work-item.ts';
+import {
+  assertWorkItemCanRun,
+  transitionWorkItem,
+  WORK_ITEM_STATUSES,
+  type WorkItem,
+  type WorkItemStatus,
+  type WorkItemTransition,
+} from '../../src/domain/work-item.ts';
 import { compareWorkspace, type WorkspaceIdentity } from '../../src/domain/workspace.ts';
 
 const identity: WorkspaceIdentity = {
@@ -75,20 +82,45 @@ describe('work item transitions', () => {
     createdAt: '',
     updatedAt: '',
   });
-  test('allowed transitions', () => {
-    assert.equal(transitionWorkItem(item('active'), 'pause'), 'paused');
-    assert.equal(transitionWorkItem(item('paused'), 'resume'), 'active');
-    assert.equal(transitionWorkItem(item('paused'), 'complete'), 'completed');
-    assert.equal(transitionWorkItem(item('completed'), 'archive'), 'archived');
-  });
-  test('invalid transitions fail', () => {
-    assert.throws(() => transitionWorkItem(item('paused'), 'pause'), {
-      code: 'INVALID_STATE_TRANSITION',
+  const RESULT: Record<WorkItemStatus, Partial<Record<WorkItemTransition, WorkItemStatus>>> = {
+    active: { pause: 'paused', complete: 'completed', archive: 'archived' },
+    paused: { resume: 'active', complete: 'completed', archive: 'archived' },
+    completed: { archive: 'archived' },
+    archived: {},
+  };
+  const TRANSITIONS = ['pause', 'resume', 'complete', 'archive'] as const;
+
+  for (const status of WORK_ITEM_STATUSES) {
+    test(`a ${status} work item allows exactly ${Object.keys(RESULT[status]).join(', ') || 'nothing'}`, () => {
+      for (const transition of TRANSITIONS) {
+        const target = RESULT[status][transition];
+        if (target === undefined) {
+          assert.throws(() => transitionWorkItem(item(status), transition), {
+            code: 'INVALID_STATE_TRANSITION',
+          });
+        } else {
+          assert.equal(transitionWorkItem(item(status), transition), target);
+        }
+      }
     });
-    assert.throws(() => transitionWorkItem(item('archived'), 'resume'), {
-      code: 'INVALID_STATE_TRANSITION',
+  }
+
+  for (const status of WORK_ITEM_STATUSES) {
+    test(`when the work item is ${status}, ${status === 'active' ? 'it can run' : 'running is refused'}`, () => {
+      if (status === 'active') {
+        assert.doesNotThrow(() => {
+          assertWorkItemCanRun(item(status));
+        });
+      } else {
+        assert.throws(
+          () => {
+            assertWorkItemCanRun(item(status));
+          },
+          { code: 'INVALID_STATE_TRANSITION' },
+        );
+      }
     });
-  });
+  }
 });
 
 describe('database capacity', () => {
