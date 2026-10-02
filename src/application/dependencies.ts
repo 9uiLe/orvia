@@ -20,6 +20,7 @@ export interface Dependencies {
   readonly clock: Clock;
   readonly logger: Logger;
   readonly limits: StorageLimits;
+  readonly orchestration: { readonly maxAutoFixRounds: number };
 }
 
 export function nowIso(deps: Pick<Dependencies, 'clock'>): string {

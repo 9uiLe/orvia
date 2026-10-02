@@ -1,5 +1,6 @@
 import type { Server } from 'node:http';
 import { Application } from '../../application/application.ts';
+import { isOrviaError } from '../../domain/errors.ts';
 import type { AgentAdapter, Clock, Logger, ProcessLauncher } from '../../application/ports.ts';
 import { claudeAdapter, codexAdapter } from '../../infrastructure/agents/adapters.ts';
 import { NodeProcessLauncher } from '../../infrastructure/agents/process-launcher.ts';
@@ -91,6 +92,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       clock,
       logger,
       limits,
+      orchestration: { maxAutoFixRounds: config.orchestration.max_review_fix_cycles },
     });
     if (opened.migration.applied.length > 0) {
       logger.info('database migrated', {
@@ -110,6 +112,17 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       logger.error('startup recovery incomplete: database storage reserve exhausted', {
         remaining: recovery.remainingRunIds.length,
       });
+    }
+    try {
+      const blocked = app.cycles.blockInterrupted();
+      if (blocked.length > 0) {
+        logger.warn('cycles interrupted by the previous daemon were blocked', {
+          count: blocked.length,
+        });
+      }
+    } catch (error) {
+      if (!isOrviaError(error) || error.code !== 'STORAGE_HARD_LIMIT') throw error;
+      logger.error('could not block interrupted cycles: database storage reserve exhausted');
     }
     await app.storage.cleanupIfNeeded();
     if (options.listen !== false) server = await startIpcServer(app, paths.socketPath);

@@ -1,3 +1,4 @@
+import type { Cycle } from '../domain/cycle.ts';
 import type { PlanId, WorkItemId } from '../domain/ids.ts';
 import type { AgentRun } from '../domain/records.ts';
 import type { StorageAssessment } from '../domain/storage.ts';
@@ -14,6 +15,8 @@ export interface OpenWorkItemSummary {
   readonly branch: string | null;
   readonly worktreeRoot: string | null;
   readonly currentRun: Pick<AgentRun, 'id' | 'agent' | 'status' | 'startedAt'> | null;
+  /** The active orchestration cycle; details (findings, history) via get_cycle. */
+  readonly cycle: Pick<Cycle, 'id' | 'state' | 'reason' | 'iteration' | 'currentRunId'> | null;
 }
 
 export interface OverallStatus {
@@ -50,6 +53,12 @@ export function describeRecovery(recovery: RecoveryResult): RecoveryView {
   };
 }
 
+function summarizeCycle(cycle: Cycle | undefined): OpenWorkItemSummary['cycle'] {
+  if (cycle === undefined) return null;
+  const { id, state, reason, iteration, currentRunId } = cycle;
+  return { id, state, reason, iteration, currentRunId };
+}
+
 export async function getStatus(
   deps: Dependencies,
   storage: StorageService,
@@ -57,6 +66,7 @@ export async function getStatus(
 ): Promise<OverallStatus> {
   const { store } = deps;
   const running = new Map(store.runs.listRunning().map((run) => [run.workItemId, run]));
+  const cycles = new Map(store.cycles.listActive().map((cycle) => [cycle.workItemId, cycle]));
   const openWorkItems = store.workItems.list({ statuses: ['active', 'paused'] }).map((item) => {
     const run = running.get(item.id);
     return {
@@ -70,6 +80,7 @@ export async function getStatus(
         run === undefined
           ? null
           : { id: run.id, agent: run.agent, status: run.status, startedAt: run.startedAt },
+      cycle: summarizeCycle(cycles.get(item.id)),
     };
   });
   return {

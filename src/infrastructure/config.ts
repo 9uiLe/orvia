@@ -37,6 +37,12 @@ const configSchema = z.strictObject({
       claude: agent.optional(),
     })
     .prefault({}),
+  orchestration: z
+    .strictObject({
+      // The brief's first candidate (3); a human resume starts the count again (ADR 0010).
+      max_review_fix_cycles: z.int().positive().default(3),
+    })
+    .prefault({}),
 });
 
 export type OrviaConfig = z.output<typeof configSchema>;

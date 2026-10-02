@@ -1,3 +1,4 @@
+import { assertTransition, isStage } from '../domain/cycle.ts';
 import { OrviaError } from '../domain/errors.ts';
 import type { PlanId, WorkItemId } from '../domain/ids.ts';
 import { assertPlanAcceptsChanges } from '../domain/plan.ts';
@@ -157,6 +158,13 @@ export function transition(
   return deps.store.transaction(() => {
     const item = requireWorkItem(deps, input.workItemId);
     const status = transitionWorkItem(item, kind);
+    if (kind !== 'resume' && deps.store.cycles.active(item.id) !== null) {
+      throw new OrviaError(
+        'CYCLE_ACTIVE',
+        `work item ${item.id} has an active cycle; cancel it first`,
+        { workItemId: item.id },
+      );
+    }
     if (kind !== 'resume' && deps.store.runs.current(item.id) !== null) {
       throw new OrviaError(
         'RUN_IN_PROGRESS',
@@ -179,6 +187,16 @@ export async function pauseWorkItem(
     deps.store.transaction(() => {
       const item = requireWorkItem(deps, input.workItemId);
       const status = transitionWorkItem(item, 'pause');
+      // The agent was the cycle's stage run; the cycle pauses with the Work Item.
+      const cycle = deps.store.cycles.active(item.id);
+      if (cycle !== null && isStage(cycle.state)) {
+        assertTransition(cycle, 'PAUSED');
+        deps.store.cycles.update(
+          cycle.id,
+          { state: 'PAUSED', reason: 'PAUSED_BY_HUMAN', resumeStage: cycle.state },
+          nowIso(deps),
+        );
+      }
       return deps.store.workItems.update(item.id, { status }, nowIso(deps));
     }, 'reserve'),
   );
