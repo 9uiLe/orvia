@@ -26,7 +26,7 @@ and validated. Its fields are bounded by `RESULT_LIMITS` in `src/application/age
 (summary, findings, titles, details, evidence, commands, paths, and messages each have a length or
 count limit; ADR 0010). A result beyond a limit is rejected, never truncated, and the cycle
 blocks. The raw structured output and the result schema sent to the agent stay in the cache.
-Cycles, reviews, and findings are durable and size-limited by the same constants.
+Reviews and findings are durable and size-limited by the same constants.
 
 ### Limits and defaults
 
@@ -60,8 +60,7 @@ reserve, because the reserve depends on the schema's b-tree count
 ([ADR 0009](0009-storage-contract.md)). A limit too small for the reserve passes validation and
 makes a migration fail: the daemon, which applies pending migrations (including the first creation
 of the database) at startup, refuses to start with `MIGRATION_STORAGE_REQUIRED` and the migration
-is rolled back. On a database that needs no migration, the same limit shows up as a
-`HARD_LIMIT` database level.
+is rolled back.
 
 ### Pressure levels
 
