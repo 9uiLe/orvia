@@ -9,7 +9,7 @@ import { requirePlan } from './plans.ts';
 import { MAX_RESULT_BYTES } from './agent-results.ts';
 import type { AgentRunRequest, RunningProcess } from './ports.ts';
 import { composeAgentPrompt } from './prompt.ts';
-import type { StorageService } from './storage.ts';
+import { runCacheRefs, type StorageService } from './storage.ts';
 import { requireWorkItem, type RunControl } from './work-items.ts';
 
 type StopReason = 'cancelled' | 'interrupted';
@@ -173,10 +173,10 @@ export class RunSupervisor implements RunControl {
 
     assertWorkspaceMatches(item.id, workspace, await deps.git.observe(workspace.worktreeRoot));
 
-    const runKey = randomUUID();
-    const outputRef = `runs/${runKey}.log`;
-    const resultRef = input.resultSchema === undefined ? null : `runs/${runKey}.result`;
-    const schemaRef = input.resultSchema === undefined ? null : `runs/${runKey}.schema.json`;
+    const refs = runCacheRefs(`runs/${randomUUID()}.log`);
+    const outputRef = refs.log;
+    const resultRef = input.resultSchema === undefined ? null : refs.result;
+    const schemaRef = input.resultSchema === undefined ? null : refs.schema;
     // Written before the run is recorded: from the insert until the process is tracked in
     // #active there must be no await, or a pause in between would miss the process.
     let result: AgentRunRequest['result'] = null;

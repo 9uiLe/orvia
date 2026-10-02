@@ -1,9 +1,19 @@
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'node:test';
 import { RESULT_LIMITS } from '../../src/application/agent-results.ts';
 import type { CycleDetails } from '../../src/application/cycles.ts';
+import { runCacheRefs } from '../../src/application/storage.ts';
 import type { OverallStatus } from '../../src/application/status.ts';
 import type { Cycle, CycleState } from '../../src/domain/cycle.ts';
 import type { Finding, Review } from '../../src/domain/review.ts';
@@ -438,6 +448,58 @@ describe('orchestration cycles', () => {
     reviewer.script = { review: [passed] };
     await call(daemon.app, 'resume_cycle', { cycleId: cycle.id });
     await settle(cycle.id, 'HUMAN_REVIEW_READY');
+  });
+
+  test('after a crash, recovery blocks the cycle and starts nothing', async () => {
+    agent.script = { implementation: [{ waitFor: release, ...implemented }] };
+    const cycle = await start();
+    await until(() => agent.invocations.length === 1);
+    await daemon.close();
+    // What a killed daemon leaves behind: the run still running and the cycle still in its stage.
+    const db = new DatabaseSync(env.paths.databaseFile);
+    db.exec(`UPDATE cycles SET state = 'IMPLEMENTING', reason = NULL, resume_stage = NULL;
+      UPDATE runs SET status = 'running', exit_code = NULL, finished_at = NULL;`);
+    db.close();
+
+    agent = new FakeAgent('fake', env.root);
+    reviewer = new FakeAgent('reviewer', env.root);
+    await boot();
+    const blocked = details(cycle.id).cycle;
+    assert.equal(blocked.state, 'BLOCKED');
+    assert.equal(blocked.reason, 'RUN_INTERRUPTED');
+    assert.equal(blocked.resumeStage, 'IMPLEMENTING');
+    assert.equal(details(cycle.id).runs[0]?.status, 'interrupted');
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(agent.invocations.length, 0);
+
+    agent.script = { implementation: [implemented], verification: [verified] };
+    reviewer.script = { review: [passed] };
+    await call(daemon.app, 'resume_cycle', { cycleId: cycle.id });
+    await settle(cycle.id, 'HUMAN_REVIEW_READY');
+  });
+
+  test('cache cleanup keeps the result files of a running stage', async () => {
+    agent.script = { implementation: [{ waitFor: release, ...implemented }] };
+    const cycle = await start();
+    const run = details(cycle.id).runs[0];
+    assert.ok(run?.outputRef);
+    const refs = runCacheRefs(run.outputRef);
+    await until(() => existsSync(join(env.paths.cacheDir, refs.result)));
+    const old = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    for (const ref of [refs.result, refs.schema]) {
+      utimesSync(join(env.paths.cacheDir, ref), old, old);
+    }
+    await call(daemon.app, 'run_storage_cleanup');
+    assert.ok(existsSync(join(env.paths.cacheDir, refs.result)));
+    assert.ok(existsSync(join(env.paths.cacheDir, refs.schema)));
+
+    agent.script = { verification: [{ waitFor: release, ...verified }] };
+    writeFileSync(release, '');
+    await until(() => details(cycle.id).cycle.state === 'VERIFYING');
+    assert.equal(
+      details(cycle.id).runs.find((stage) => stage.purpose === 'implementation')?.result,
+      JSON.stringify(implemented.result),
+    );
   });
 
   test('cycles of different Work Items run side by side without mixing', async () => {

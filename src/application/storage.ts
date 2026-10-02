@@ -8,6 +8,23 @@ import {
 import type { Dependencies } from './dependencies.ts';
 import type { CleanupFailure } from './ports.ts';
 
+/**
+ * Every cache entry of one run, derived from its log ref: the log, and for cycle stages the raw
+ * stdout result and the result schema. Cleanup protects and removes them together.
+ */
+export function runCacheRefs(outputRef: string): {
+  log: string;
+  result: string;
+  schema: string;
+} {
+  const base = outputRef.replace(/\.log$/, '');
+  return { log: outputRef, result: `${base}.result`, schema: `${base}.schema.json` };
+}
+
+function allRunCacheRefs(outputRef: string): string[] {
+  return Object.values(runCacheRefs(outputRef));
+}
+
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 export interface StorageStatus {
@@ -109,14 +126,15 @@ export class StorageService {
       );
       if (!deleted) break;
       pruned.runIds.push(candidate.runId);
-      if (candidate.outputRef !== null) pruned.outputRefs.push(candidate.outputRef);
+      if (candidate.outputRef !== null)
+        pruned.outputRefs.push(...allRunCacheRefs(candidate.outputRef));
     }
     failures.push(...(await cache.remove(pruned.outputRefs)));
 
     const expiresBefore = new Date(clock.now().getTime() - limits.retentionDays * DAY_MS);
     const protectedRefs = new Set(
       attempt('database:running', () => store.runs.listRunning(), []).flatMap((run) =>
-        run.outputRef === null ? [] : [run.outputRef],
+        run.outputRef === null ? [] : allRunCacheRefs(run.outputRef),
       ),
     );
     const sweep = await cache.sweep({
