@@ -62,7 +62,10 @@ export class NodeProcessLauncher implements ProcessLauncher {
    * Descendants that create their own session or group (setsid, daemonizing tools) leave
    * it and are not tracked. On Windows only the agent process itself is signalled.
    */
-  launch(invocation: AgentInvocation, onOutput: (chunk: Uint8Array) => void): RunningProcess {
+  launch(
+    invocation: AgentInvocation,
+    onOutput: (chunk: Uint8Array, stream: 'stdout' | 'stderr') => void,
+  ): RunningProcess {
     const posix = process.platform !== 'win32';
     const policy = this.#policy;
     // The prompt goes through stdin rather than argv so it does not appear in process listings.
@@ -92,8 +95,12 @@ export class NodeProcessLauncher implements ProcessLauncher {
         resolve();
       }),
     );
-    child.stdout.on('data', onOutput);
-    child.stderr.on('data', onOutput);
+    child.stdout.on('data', (chunk: Buffer) => {
+      onOutput(chunk, 'stdout');
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      onOutput(chunk, 'stderr');
+    });
     child.stdin.on('error', () => {
       // The agent may exit before reading all of stdin; its exit status reports the outcome.
     });

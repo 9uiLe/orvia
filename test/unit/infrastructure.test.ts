@@ -82,6 +82,8 @@ describe('agent adapters', () => {
       writableRoots: ['/wt/a', '/r/.git/worktrees/a', '/r/.git'],
     },
     prompt: 'secret instructions',
+    access: 'edit' as const,
+    result: null,
   };
 
   test('codex runs in the bound worktree with its workspace-write sandbox', () => {
@@ -119,6 +121,32 @@ describe('operation registry', () => {
       const schema = z.toJSONSchema(operation.input) as { type: string };
       assert.equal(schema.type, 'object', operation.name);
     }
+  });
+
+  test('cycle operations are exposed with the storage class their effect needs', () => {
+    const classes = Object.fromEntries(
+      OPERATIONS.map((operation) => [operation.name, operation.operationClass]),
+    );
+    assert.deepEqual(
+      [
+        'start_cycle',
+        'get_cycle',
+        'get_current_review',
+        'get_review',
+        'pause_cycle',
+        'resume_cycle',
+        'cancel_cycle',
+      ].map((name) => [name, classes[name]]),
+      [
+        ['start_cycle', 'agent_run'],
+        ['get_cycle', 'read'],
+        ['get_current_review', 'read'],
+        ['get_review', 'read'],
+        ['pause_cycle', 'control'],
+        ['resume_cycle', 'agent_run'],
+        ['cancel_cycle', 'control'],
+      ],
+    );
   });
 
   test('every Work Item mutation requires an explicit workItemId', () => {

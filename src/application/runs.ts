@@ -1,17 +1,31 @@
 import { randomUUID } from 'node:crypto';
 import { isOrviaError, OrviaError } from '../domain/errors.ts';
-import type { RunId, WorkItemId } from '../domain/ids.ts';
-import type { AgentRun } from '../domain/records.ts';
+import type { CycleId, RunId, WorkItemId } from '../domain/ids.ts';
+import type { AgentRun, RunPurpose } from '../domain/records.ts';
 import { filesystemPolicyFor } from '../domain/sandbox.ts';
 import { assertWorkspaceMatches, compareWorkspace } from '../domain/workspace.ts';
 import { nowIso, type Dependencies } from './dependencies.ts';
 import { requirePlan } from './plans.ts';
-import type { RunningProcess } from './ports.ts';
+import { MAX_RESULT_BYTES } from './agent-results.ts';
+import type { AgentRunRequest, RunningProcess } from './ports.ts';
 import { composeAgentPrompt } from './prompt.ts';
 import type { StorageService } from './storage.ts';
 import { requireWorkItem, type RunControl } from './work-items.ts';
 
 type StopReason = 'cancelled' | 'interrupted';
+
+export interface StartRunInput {
+  readonly workItemId: WorkItemId;
+  readonly agent: string;
+  readonly instructions: string;
+  readonly purpose?: RunPurpose;
+  readonly cycleId?: CycleId | null;
+  readonly access?: 'edit' | 'read-only';
+  /** JSON Schema the agent's final answer must match; the result is passed to onFinished. */
+  readonly resultSchema?: Record<string, unknown>;
+  /** Runs inside the transaction that records the run, before the agent starts. */
+  readonly withinTransaction?: (run: AgentRun) => void;
+}
 
 export type RecoveryResult =
   | { readonly state: 'complete'; readonly recoveredRunIds: readonly RunId[] }
@@ -60,6 +74,7 @@ export class RunSupervisor implements RunControl {
   /** Work Items whose agents are being stopped; no new run may start for them meanwhile. */
   readonly #stopping = new Set<WorkItemId>();
   #recovery: RecoveryResult = { state: 'complete', recoveredRunIds: [] };
+  #closing = false;
 
   constructor(deps: Dependencies, storage: StorageService) {
     this.#deps = deps;
@@ -108,14 +123,28 @@ export class RunSupervisor implements RunControl {
     return this.#recovery;
   }
 
-  async start(input: {
-    workItemId: WorkItemId;
-    agent: string;
-    instructions: string;
-  }): Promise<AgentRun> {
+  /**
+   * Called once a run's final state is committed, with its structured result text when the run
+   * was started with a result schema. Awaited before the run counts as recorded, so shutdown
+   * sees its effects.
+   */
+  onFinished: ((run: AgentRun, rawResult: string | null) => Promise<void>) | null = null;
+
+  async start(input: StartRunInput): Promise<AgentRun> {
     const deps = this.#deps;
+    const purpose = input.purpose ?? 'manual';
+    if (this.#closing) {
+      throw new OrviaError('INVALID_STATE_TRANSITION', 'the daemon is shutting down');
+    }
     const item = requireWorkItem(deps, input.workItemId);
     this.#assertNotStopping(item.id);
+    if (purpose === 'manual' && deps.store.cycles.active(item.id) !== null) {
+      throw new OrviaError(
+        'CYCLE_ACTIVE',
+        `work item ${item.id} has an active cycle; control it with the cycle operations`,
+        { workItemId: item.id },
+      );
+    }
     if (item.status !== 'active') {
       throw new OrviaError(
         'INVALID_STATE_TRANSITION',
@@ -144,8 +173,23 @@ export class RunSupervisor implements RunControl {
 
     assertWorkspaceMatches(item.id, workspace, await deps.git.observe(workspace.worktreeRoot));
 
-    const outputRef = `runs/${randomUUID()}.log`;
+    const runKey = randomUUID();
+    const outputRef = `runs/${runKey}.log`;
+    const resultRef = input.resultSchema === undefined ? null : `runs/${runKey}.result`;
+    const schemaRef = input.resultSchema === undefined ? null : `runs/${runKey}.schema.json`;
+    // Written before the run is recorded: from the insert until the process is tracked in
+    // #active there must be no await, or a pause in between would miss the process.
+    let result: AgentRunRequest['result'] = null;
+    if (input.resultSchema !== undefined && schemaRef !== null) {
+      const schemaWriter = deps.cache.createWriter(schemaRef);
+      schemaWriter.write(new TextEncoder().encode(JSON.stringify(input.resultSchema)));
+      await schemaWriter.close();
+      result = { schema: input.resultSchema, schemaPath: deps.cache.absolutePath(schemaRef) };
+    }
     const { run, prompt } = deps.store.transaction(() => {
+      if (this.#closing) {
+        throw new OrviaError('INVALID_STATE_TRANSITION', 'the daemon is shutting down');
+      }
       const fresh = requireWorkItem(deps, item.id);
       this.#assertNotStopping(fresh.id);
       if (fresh.status !== 'active') {
@@ -166,12 +210,18 @@ export class RunSupervisor implements RunControl {
       }
       const plan = requirePlan(deps, fresh.planId);
       return {
-        run: deps.store.runs.insert({
-          workItemId: fresh.id,
-          agent: adapter.name,
-          outputRef,
-          now: nowIso(deps),
-        }),
+        run: (() => {
+          const inserted = deps.store.runs.insert({
+            workItemId: fresh.id,
+            agent: adapter.name,
+            outputRef,
+            purpose,
+            cycleId: input.cycleId ?? null,
+            now: nowIso(deps),
+          });
+          input.withinTransaction?.(inserted);
+          return inserted;
+        })(),
         prompt: composeAgentPrompt({
           plan,
           workItem: fresh,
@@ -183,10 +233,18 @@ export class RunSupervisor implements RunControl {
       };
     });
 
-    const invocation = adapter.buildInvocation({ policy: filesystemPolicyFor(workspace), prompt });
+    const invocation = adapter.buildInvocation({
+      policy: filesystemPolicyFor(workspace),
+      prompt,
+      access: input.access ?? 'edit',
+      result,
+    });
     const writer = deps.cache.createWriter(outputRef);
-    const process = deps.launcher.launch(invocation, (chunk) => {
+    // The structured result is read from stdout alone; the log keeps both streams.
+    const resultWriter = resultRef === null ? null : deps.cache.createWriter(resultRef);
+    const process = deps.launcher.launch(invocation, (chunk, stream) => {
       writer.write(chunk);
+      if (stream === 'stdout') resultWriter?.write(chunk);
     });
     const active: ActiveRun = { runId: run.id, process, stopReason: null };
     this.#active.set(item.id, active);
@@ -199,6 +257,7 @@ export class RunSupervisor implements RunControl {
     const recorded = process.exited
       .then(async (exit) => {
         const output = await writer.close();
+        await resultWriter?.close();
         const status =
           active.stopReason ??
           (exit.exitCode === 0 && exit.leftoverError === null ? 'succeeded' : 'failed');
@@ -225,6 +284,16 @@ export class RunSupervisor implements RunControl {
           exitCode: exit.exitCode,
           spawnError: exit.spawnError,
         });
+        this.#forget(item.id, run.id);
+        if (this.onFinished !== null) {
+          const finished = deps.store.runs.get(run.id);
+          // One byte past the limit is enough for the parser to see an oversized result.
+          const stdout =
+            resultRef === null ? null : await deps.cache.readHead(resultRef, MAX_RESULT_BYTES + 1);
+          if (finished !== null) {
+            await this.onFinished(finished, stdout === null ? null : adapter.extractResult(stdout));
+          }
+        }
       })
       .catch((error: unknown) => {
         deps.logger.error('failed to record agent run result', {
@@ -233,7 +302,7 @@ export class RunSupervisor implements RunControl {
         });
       })
       .finally(() => {
-        this.#active.delete(item.id);
+        this.#forget(item.id, run.id);
         this.#recorded.delete(run.id);
       });
     this.#recorded.set(run.id, recorded);
@@ -286,6 +355,7 @@ export class RunSupervisor implements RunControl {
    * because the daemon is going away either way.
    */
   async shutdown(): Promise<void> {
+    this.#closing = true;
     const ids = [...this.#active.keys()];
     ids.forEach((id) => this.#stopping.add(id));
     const results = await Promise.allSettled(ids.map((id) => this.#stop(id, 'interrupted')));
@@ -303,6 +373,16 @@ export class RunSupervisor implements RunControl {
         remaining: recovery.remainingRunIds.length,
       });
     }
+  }
+
+  /** The listener may already have started the Work Item's next run; leave that one tracked. */
+  #forget(workItemId: WorkItemId, runId: RunId): void {
+    if (this.#active.get(workItemId)?.runId === runId) this.#active.delete(workItemId);
+  }
+
+  /** Stops the Work Item's running agent, if any, and waits until its run is recorded. */
+  async stopRun(workItemId: WorkItemId): Promise<void> {
+    await this.#stop(workItemId, 'cancelled');
   }
 
   async #stop(workItemId: WorkItemId, reason: StopReason): Promise<void> {

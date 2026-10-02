@@ -81,6 +81,27 @@ export class FileCache implements EphemeralStore {
     }
   }
 
+  async readHead(ref: string, maxBytes: number): Promise<string | null> {
+    let handle;
+    try {
+      handle = await open(this.#resolve(ref), 'r');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
+    }
+    try {
+      const buffer = Buffer.alloc(maxBytes);
+      const { bytesRead } = await handle.read(buffer, 0, maxBytes, 0);
+      return buffer.subarray(0, bytesRead).toString('utf8');
+    } finally {
+      await handle.close();
+    }
+  }
+
+  absolutePath(ref: string): string {
+    return this.#resolve(ref);
+  }
+
   async remove(refs: readonly string[]): Promise<CleanupFailure[]> {
     const failures: CleanupFailure[] = [];
     for (const ref of refs) {
