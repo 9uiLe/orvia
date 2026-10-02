@@ -275,7 +275,7 @@ export interface AgentRunRequest {
   readonly prompt: string;
   /**
    * What this run may do. Adapters translate it into the CLI's own controls and grant nothing
-   * beyond it, so a review without workspaceWrite cannot edit.
+   * beyond it that those controls can withhold, so a review without workspaceWrite cannot edit.
    */
   readonly capabilities: readonly AgentCapability[];
   /** Present when the run must end with a JSON result matching `schema`. */

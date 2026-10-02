@@ -165,6 +165,8 @@ describe('orchestration cycles', () => {
     ]);
     assert.match(invocation(reviewer, 0).stdin, /Do not rely on what the implementation/);
     assert.match(invocation(reviewer, 0).stdin, /Orvia rules \(highest precedence\)/);
+    // Exploratory commands are not checks; one that fails must not fail the verification.
+    assert.match(invocation(agent, 1).stdin, /List only checks: leave out commands you ran/);
 
     const { runs, latestReview } = details(cycle.id);
     assert.deepEqual(

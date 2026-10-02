@@ -7,6 +7,9 @@ function extraWritableRoots(request: AgentRunRequest): string[] {
 /**
  * Codex enforces the request with its own sandbox. With `--output-schema` it prints only the
  * final message, the structured result, to stdout; progress goes to stderr.
+ *
+ * Codex has no switch to turn its shell off: without commandExecution the read-only sandbox
+ * still runs commands, but none of them can write (observed in local validation).
  */
 export const codexAdapter: AgentAdapter = {
   id: 'codex',

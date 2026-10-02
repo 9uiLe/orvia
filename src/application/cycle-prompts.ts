@@ -29,7 +29,7 @@ export function verificationInstructions(): string {
   return [
     'Role: verification. Do not change source files.',
     'Work out how this repository checks changes from its own files (package scripts, Makefile, README, AGENTS.md, CLAUDE.md, CI configuration) and run the relevant checks: build or typecheck, lint, and tests.',
-    `Report every command you ran with its exit code and a one-line summary (at most ${L.commands} commands, ${L.command} characters per command, ${L.commandSummary} per summary).`,
+    `List the checks you ran in \`commands\`, each with its exit code and a one-line summary (at most ${L.commands} commands, ${L.command} characters per command, ${L.commandSummary} per summary). List only checks: leave out commands you ran to read files or explore the repository.`,
     'Status `passed` only if you ran at least one command and every command exited with 0. Status ' +
       '`failed` if a check failed. Status `blocked` if the checks cannot run here: no way to find ' +
       'them, missing tools, credentials, services, or network. Never report `passed` for checks ' +
