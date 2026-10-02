@@ -72,20 +72,23 @@ Four roles: implementation, verification, review, fix. Each stage starts one age
 role-specific instruction. The prompt is composed at launch from the latest Plan, decisions,
 and context, after the workspace identity is validated again. No prompt snapshot is replayed.
 
-- **Verification** is done by the implementation agent, which finds the checks from the
-  repository's own files (package scripts, Makefile, README, AGENTS.md, CI configuration) and
-  reports each command with its exit code. Orvia adds no files to the repository. `passed` must
-  list at least one command, all with exit code 0; `blocked` (checks cannot run) stops the
-  cycle as `BLOCKED / VERIFICATION_BLOCKED` instead of passing it.
-- **Review** runs the review agent read-only: Codex with `--sandbox read-only`, Claude Code with
-  `--tools Read,Grep,Glob --permission-mode dontAsk`. The reviewer is told not to rely on the
-  implementer's report and to examine the worktree, the branch diff, and the tests itself.
+Implementation, verification, and fix run under the cycle's implementation profile, review
+under its review profile. Which agent CLI a profile uses, and how each stage's capabilities
+become CLI flags, is decided by adapters (ADR 0011).
+
+- **Verification** finds the checks from the repository's own files (package scripts, Makefile,
+  README, AGENTS.md, CI configuration) and reports each check with its exit code; commands run
+  only to read or explore are left out, because one of them failing would fail a run whose
+  checks passed (observed in local validation). Orvia adds no files to the repository. `passed`
+  must list at least one command, all with exit code 0; `blocked` (checks cannot run) stops the
+  cycle as `BLOCKED / VERIFICATION_BLOCKED` instead of passing it. The report is the agent's;
+  Orvia does not run or attest the commands.
+- **Review** gets read access only. Orvia collects the changes from git (status with untracked
+  files, and the diff from the cycle's base commit to the working tree) and puts them in the
+  prompt as data, so the reviewer needs no command execution (ADR 0011). The reviewer is told
+  not to rely on the implementer's report.
 - **Fix** receives either the failing verification commands or the review findings that the
   policy marked `AUTO_FIX`, never the reviewer's free text or findings that need a human.
-- Editing roles run Codex with `--sandbox workspace-write` and Claude Code with
-  `--permission-mode acceptEdits`. Whether Claude Code may run shell commands (needed for
-  verification) is left to the user's own Claude Code permission settings; Orvia neither grants
-  nor denies Bash.
 
 Instruction precedence, stated in every prompt: Orvia rules (role, result format, working
 directory) > accepted human decisions > cycle instructions and human context > repository
@@ -95,9 +98,8 @@ the rules.
 
 ### Structured result protocol
 
-Each stage passes a JSON Schema to the agent: Codex `--output-schema <file>` (result on
-stdout), Claude Code `--output-format json --json-schema '<schema>'` (result in
-`structured_output`). The schema uses only the strict structured-output subset: types, enums,
+Each stage passes a JSON Schema to the agent; the adapter delivers it in the CLI's own way and
+extracts the result from the CLI's output. The schema uses only the strict structured-output subset: types, enums,
 all properties required, `additionalProperties: false`, null through a type union. Length and
 integer limits are checked by Orvia after parsing.
 
@@ -150,8 +152,16 @@ candidate in the milestone brief, and the reset rule was chosen by the maintaine
   its state. `pause_work_item` also pauses the Work Item's running cycle.
 - After a daemon restart, cycles that were in a stage become `BLOCKED / RUN_INTERRUPTED`.
   Nothing is relaunched until a human calls `resume_cycle`.
-- Cycle-initiated launches pass the same storage and recovery gates as `start_run`; if a launch
-  is refused, the cycle is `BLOCKED / START_FAILED`.
+- Cycle-initiated launches pass the same storage and recovery gates as `start_run`. If a launch
+  is refused, the cycle is `BLOCKED` with the cause as its reason (`AGENT_PROFILE_NOT_FOUND`,
+  `AGENT_CAPABILITY_MISMATCH`, `AGENT_UNAVAILABLE`, `STORAGE_HARD_LIMIT`,
+  `RESULT_STORAGE_EXHAUSTED`), or `START_FAILED` for anything else. A `pause_work_item` that
+  lands while a stage is being started can leave `START_FAILED` instead of `PAUSED`; no agent
+  runs either way.
+- The cache space for a stage's structured result is reserved before the agent starts, so
+  verbose output cannot crowd it out. No room is `RESULT_STORAGE_EXHAUSTED`, and output Orvia
+  could not keep is reported the same way; only output from the agent that is malformed or
+  larger than any valid result is a protocol error.
 - SQLite stores cycle state, review summaries, bounded findings, and the small validated
   result of each stage run. Full agent output and the raw stdout stay in the bounded cache.
   Stage results are written with ordinary write capacity, not the control reserve, because a
@@ -182,7 +192,6 @@ candidate in the milestone brief, and the reset rule was chosen by the maintaine
 - Fix scope is instructed, not enforced: Orvia does not check that a fix changed only what the
   findings required.
 - Findings are not matched across reviews; each review is a fresh assessment.
-- If the cache is full while an agent writes its result, the result is lost and the stage is
-  blocked as a protocol failure.
-- The real Codex and Claude Code CLIs are not run end to end in CI; their command lines and
-  result extraction are unit-tested, and the loop is tested with a scripted fake agent.
+- Real agent CLIs are not run in CI; adapters' command lines and result extraction are
+  unit-tested, the loop is tested with scripted fake adapters, and real CLIs were run locally
+  (README, Compatibility).
