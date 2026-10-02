@@ -56,7 +56,7 @@ export interface Cycle {
   readonly mode: CycleMode;
   readonly state: CycleState;
   readonly reason: CycleReason | null;
-  /** The stage to run again when a PAUSED or BLOCKED cycle is resumed. */
+  /** The stage to run again when a NEEDS_HUMAN, PAUSED, or BLOCKED cycle is resumed. */
   readonly resumeStage: StageState | null;
   /** Reviews completed in this cycle. */
   readonly iteration: number;
@@ -130,6 +130,38 @@ export function resumeStageAfterEscalation(stage: StageState): StageState {
   if (stage === 'IMPLEMENTING') return 'IMPLEMENTING';
   if (stage === 'REVIEWING') return 'REVIEWING';
   return 'VERIFYING';
+}
+
+/**
+ * The complete state-dependent part of a cycle for entering `target`. Every transition builds
+ * its patch here so `reason`, `resumeStage`, and `completedAt` always agree with `state`:
+ * waiting states keep a stage to resume (`from`, the stage being left), terminal states are
+ * completed and resume nothing, stage states carry neither a reason nor a resume stage.
+ */
+export function enterState(
+  target: CycleState,
+  entry: { reason?: CycleReason; from?: StageState; now: string },
+): Pick<Cycle, 'state' | 'reason' | 'resumeStage' | 'completedAt'> {
+  if (isStage(target)) {
+    return { state: target, reason: null, resumeStage: null, completedAt: null };
+  }
+  if ((TERMINAL_STATES as readonly CycleState[]).includes(target)) {
+    return {
+      state: target,
+      reason: entry.reason ?? null,
+      resumeStage: null,
+      completedAt: entry.now,
+    };
+  }
+  if (entry.from === undefined) {
+    throw new OrviaError('INTERNAL', `entering ${target} needs the stage being left`);
+  }
+  return {
+    state: target,
+    reason: entry.reason ?? null,
+    resumeStage: target === 'NEEDS_HUMAN' ? resumeStageAfterEscalation(entry.from) : entry.from,
+    completedAt: null,
+  };
 }
 
 /** Where `resume_cycle` continues from. */

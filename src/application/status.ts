@@ -2,7 +2,7 @@ import type { Cycle } from '../domain/cycle.ts';
 import type { PlanId, WorkItemId } from '../domain/ids.ts';
 import type { AgentRun } from '../domain/records.ts';
 import type { StorageAssessment } from '../domain/storage.ts';
-import type { WorkItemStatus } from '../domain/work-item.ts';
+import { OPEN_STATUSES, type WorkItemStatus } from '../domain/work-item.ts';
 import type { Dependencies } from './dependencies.ts';
 import { RECOVERY_REMEDIATION, type RecoveryResult } from './runs.ts';
 import type { StorageService } from './storage.ts';
@@ -67,7 +67,7 @@ export async function getStatus(
   const { store } = deps;
   const running = new Map(store.runs.listRunning().map((run) => [run.workItemId, run]));
   const cycles = new Map(store.cycles.listActive().map((cycle) => [cycle.workItemId, cycle]));
-  const openWorkItems = store.workItems.list({ statuses: ['active', 'paused'] }).map((item) => {
+  const openWorkItems = store.workItems.list({ statuses: OPEN_STATUSES }).map((item) => {
     const run = running.get(item.id);
     return {
       id: item.id,

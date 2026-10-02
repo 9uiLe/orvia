@@ -38,6 +38,10 @@ export const IMPLEMENTATION_PROFILE_STAGES: readonly StageState[] = [
 ];
 export const REVIEW_PROFILE_STAGES: readonly StageState[] = ['REVIEWING'];
 
+export function profileRoleFor(stage: StageState): 'implementation' | 'review' {
+  return REVIEW_PROFILE_STAGES.includes(stage) ? 'review' : 'implementation';
+}
+
 /**
  * A profile can only narrow what its adapter provides; it cannot grant a capability the
  * adapter does not have. `policy` null means "everything the adapter provides".

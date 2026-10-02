@@ -34,11 +34,20 @@ function errnoCode(error: unknown): string | undefined {
   return (error as NodeJS.ErrnoException).code;
 }
 
+/** Sends a signal to a process or group; signal 0 only checks that it exists. */
+export type SignalFunction = (target: number, signal: NodeJS.Signals | 0) => void;
+
 export class NodeProcessLauncher implements ProcessLauncher {
   readonly #policy: TerminationPolicy;
+  readonly #kill: SignalFunction;
 
-  constructor(policy: TerminationPolicy) {
+  /**
+   * `kill` is injectable only so tests can make a process group look unkillable: a real process
+   * that survives SIGKILL cannot be created on demand.
+   */
+  constructor(policy: TerminationPolicy, kill: SignalFunction = process.kill.bind(process)) {
     this.#policy = policy;
+    this.#kill = kill;
   }
 
   async resolveCommand(command: string): Promise<string | null> {
@@ -68,6 +77,7 @@ export class NodeProcessLauncher implements ProcessLauncher {
   ): RunningProcess {
     const posix = process.platform !== 'win32';
     const policy = this.#policy;
+    const kill = this.#kill;
     // The prompt goes through stdin rather than argv so it does not appear in process listings.
     const child = spawn(invocation.command, [...invocation.args], {
       cwd: invocation.cwd,
@@ -111,7 +121,7 @@ export class NodeProcessLauncher implements ProcessLauncher {
       if (target === undefined) return false;
       if (!posix && childExited) return false;
       try {
-        process.kill(target, 0);
+        kill(target, 0);
         return true;
       } catch (error) {
         return errnoCode(error) === 'EPERM';
@@ -120,7 +130,7 @@ export class NodeProcessLauncher implements ProcessLauncher {
     const send = (signal: NodeJS.Signals): void => {
       if (target === undefined) return;
       try {
-        process.kill(target, signal);
+        kill(target, signal);
       } catch (error) {
         if (errnoCode(error) !== 'ESRCH') throw error;
       }

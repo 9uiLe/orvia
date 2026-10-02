@@ -5,6 +5,14 @@ import { RESULT_LIMITS, type VerificationResult } from './agent-results.ts';
 
 const L = RESULT_LIMITS;
 
+/** Each prompt opens with its role; tests identify the stage of a prompt by this text. */
+export const STAGE_ROLES = {
+  implementation: 'Role: implementation agent.',
+  verification: 'Role: verification.',
+  review: 'Role: independent reviewer.',
+  fix: 'Role: fix agent.',
+} as const;
+
 const RESULT_RULE =
   'End with the JSON result described by the output schema. Put no source code, diffs, or logs ' +
   'into it; refer to files by path and line instead.';
@@ -16,7 +24,7 @@ const HUMAN_DECISIONS =
 
 export function implementationInstructions(cycle: Cycle): string {
   return [
-    'Role: implementation agent.',
+    STAGE_ROLES.implementation,
     `Implement the following:\n\n${cycle.instructions}`,
     `Do not decide on your own anything a human must decide: ${HUMAN_DECISIONS}. If the work ` +
       'needs such a decision, or the requirements are ambiguous, stop and report status ' +
@@ -27,7 +35,7 @@ export function implementationInstructions(cycle: Cycle): string {
 
 export function verificationInstructions(): string {
   return [
-    'Role: verification. Do not change source files.',
+    `${STAGE_ROLES.verification} Do not change source files.`,
     'Work out how this repository checks changes from its own files (package scripts, Makefile, README, AGENTS.md, CLAUDE.md, CI configuration) and run the relevant checks: build or typecheck, lint, and tests.',
     `List the checks you ran in \`commands\`, each with its exit code and a one-line summary (at most ${L.commands} commands, ${L.command} characters per command, ${L.commandSummary} per summary). List only checks: leave out commands you ran to read files or explore the repository.`,
     'Status `passed` only if you ran at least one command and every command exited with 0. Status ' +
@@ -46,7 +54,7 @@ function fenced(text: string): string {
 
 export function reviewInstructions(cycle: Cycle, changes: ChangeEvidence): string {
   return [
-    'Role: independent reviewer. Do not modify any file.',
+    `${STAGE_ROLES.review} Do not modify any file.`,
     'Do not rely on what the implementation agent reported. Orvia collected the changes below ' +
       'from git. Judge them yourself: read the changed and untracked files in the worktree as ' +
       'needed, together with the tests and the decisions and context above.',
@@ -106,7 +114,7 @@ export function fixInstructions(
         `human can make (${HUMAN_DECISIONS}) or without missing information, do not work around ` +
         'it: report status `needs_input` and explain in the summary.';
   return [
-    'Role: fix agent.',
+    STAGE_ROLES.fix,
     work,
     escalation,
     `Otherwise report status \`fixed\` with an empty disputedFindingIds and a summary (at most ${L.summary} characters). ${RESULT_RULE}`,

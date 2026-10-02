@@ -141,4 +141,30 @@ describe('plans and work items', () => {
       'INVALID_STATE_TRANSITION',
     );
   });
+
+  for (const closing of ['complete_work_item', 'archive_work_item'] as const) {
+    test(`when the work item is ${closing === 'complete_work_item' ? 'completed' : 'archived'}, changes to it are refused`, async () => {
+      await call(daemon.app, 'create_plan', { title: 'P' });
+      const item = await createItem('W');
+      await call(daemon.app, closing, { workItemId: item.id });
+      const target = { workItemId: item.id };
+
+      await rejectsWith(
+        call(daemon.app, 'update_work_item', { ...target, title: 'x' }),
+        'INVALID_STATE_TRANSITION',
+      );
+      await rejectsWith(
+        call(daemon.app, 'bind_workspace', { ...target, worktreePath: env.root }),
+        'INVALID_STATE_TRANSITION',
+      );
+      await rejectsWith(
+        call(daemon.app, 'record_decision', { ...target, title: 'd', body: 'b' }),
+        'INVALID_STATE_TRANSITION',
+      );
+      await rejectsWith(
+        call(daemon.app, 'add_context', { ...target, body: 'c' }),
+        'INVALID_STATE_TRANSITION',
+      );
+    });
+  }
 });

@@ -2,7 +2,7 @@ import { OrviaError } from '../domain/errors.ts';
 import type { PlanId } from '../domain/ids.ts';
 import { assertPlanAcceptsChanges, type Plan, type PlanStatus } from '../domain/plan.ts';
 import type { Decision, Note } from '../domain/records.ts';
-import type { WorkItem } from '../domain/work-item.ts';
+import { OPEN_STATUSES, type WorkItem } from '../domain/work-item.ts';
 import { nowIso, type Dependencies } from './dependencies.ts';
 
 export interface PlanDetails {
@@ -66,7 +66,7 @@ export function archivePlan(deps: Dependencies, input: { planId: PlanId }): Plan
   return deps.store.transaction(() => {
     const plan = requirePlan(deps, input.planId);
     assertPlanAcceptsChanges(plan);
-    const open = deps.store.workItems.list({ planId: plan.id, statuses: ['active', 'paused'] });
+    const open = deps.store.workItems.list({ planId: plan.id, statuses: OPEN_STATUSES });
     if (open.length > 0) {
       throw new OrviaError(
         'INVALID_STATE_TRANSITION',

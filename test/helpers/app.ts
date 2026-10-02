@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Application } from '../../src/application/application.ts';
+import { STAGE_ROLES } from '../../src/application/cycle-prompts.ts';
 import { invokeOperation } from '../../src/application/operations.ts';
 import type {
   AgentAdapter,
@@ -33,12 +34,12 @@ export interface FakeStep {
   readonly holdFor?: string;
 }
 
-export type FakeRole = 'implementation' | 'verification' | 'review' | 'fix';
+export type FakeRole = keyof typeof STAGE_ROLES;
 
 /**
  * A fake adapter. Records every invocation so tests can assert where (and whether) an agent
  * was started and what it was allowed. Cycle stages are answered from `script`, per role, in
- * order; the role is read from the prompt's "Role:" line. Other runs use `mode`.
+ * order; the role is read from the prompt's role line. Other runs use `mode`.
  */
 export class FakeAgent implements AgentAdapter {
   readonly id: string;
@@ -58,9 +59,9 @@ export class FakeAgent implements AgentAdapter {
   }
 
   buildInvocation: AgentAdapter['buildInvocation'] = (command, request) => {
-    const role = /Role: (?:independent )?(implementation|verification|review|fix)/.exec(
-      request.prompt,
-    )?.[1] as FakeRole | undefined;
+    const role = (Object.keys(STAGE_ROLES) as FakeRole[]).find((candidate) =>
+      request.prompt.includes(STAGE_ROLES[candidate]),
+    );
     let args = [FAKE_AGENT, this.mode];
     if (role !== undefined) {
       const step = this.script[role]?.shift() ?? {

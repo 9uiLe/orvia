@@ -50,8 +50,29 @@ export function transitionWorkItem(item: WorkItem, transition: WorkItemTransitio
   return TARGET[transition];
 }
 
+export const OPEN_STATUSES: readonly WorkItemStatus[] = ['active', 'paused'];
+
 export function isOpen(status: WorkItemStatus): boolean {
-  return status === 'active' || status === 'paused';
+  return OPEN_STATUSES.includes(status);
+}
+
+export function assertWorkItemCanRun(item: WorkItem): void {
+  if (item.status !== 'active') {
+    throw new OrviaError(
+      'INVALID_STATE_TRANSITION',
+      `work item ${item.id} is ${item.status}; only active work items can run`,
+      { workItemId: item.id, status: item.status },
+    );
+  }
+}
+
+export function requireBoundWorkspace(item: WorkItem): WorkspaceIdentity {
+  if (item.workspace === null) {
+    throw new OrviaError('WORKSPACE_NOT_BOUND', `work item ${item.id} has no bound worktree`, {
+      workItemId: item.id,
+    });
+  }
+  return item.workspace;
 }
 
 export function assertWorkItemAcceptsChanges(item: WorkItem): void {

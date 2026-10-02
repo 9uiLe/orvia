@@ -4,8 +4,12 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'node:test';
 import type { AgentProfileView } from '../../src/application/agent-profiles.ts';
 import type { CycleDetails } from '../../src/application/cycles.ts';
-import type { AgentCapability } from '../../src/domain/agent-profile.ts';
-import type { Cycle, CycleState } from '../../src/domain/cycle.ts';
+import {
+  AGENT_CAPABILITIES,
+  requiredCapabilitiesFor,
+  type AgentCapability,
+} from '../../src/domain/agent-profile.ts';
+import type { Cycle, CycleState, StageState } from '../../src/domain/cycle.ts';
 import type { WorkItem } from '../../src/domain/work-item.ts';
 import type { Daemon } from '../../src/interface/daemon/daemon.ts';
 import {
@@ -150,52 +154,24 @@ describe('agent profiles and capabilities', () => {
   });
 
   describe('capability mismatch is refused before any agent starts', () => {
-    const cases: [string, Profiles, string, string, AgentCapability[]][] = [
-      [
-        'implementation profile without workspaceWrite',
-        {
-          ...PROFILES,
-          'primary-profile': {
-            adapter: 'adapter-a',
-            capabilities: ['workspaceRead', 'commandExecution', 'structuredResult'],
-          },
-        },
-        'primary-profile',
-        'IMPLEMENTING',
-        ['workspaceWrite'],
-      ],
-      [
-        'verification profile without commandExecution',
-        {
-          ...PROFILES,
-          'primary-profile': {
-            adapter: 'adapter-a',
-            capabilities: ['workspaceRead', 'workspaceWrite', 'structuredResult'],
-          },
-        },
-        'primary-profile',
-        'VERIFYING',
-        ['commandExecution'],
-      ],
-      [
-        'review profile without workspaceRead',
-        {
-          ...PROFILES,
-          'review-profile': { adapter: 'adapter-b', capabilities: ['structuredResult'] },
-        },
-        'review-profile',
-        'REVIEWING',
-        ['workspaceRead'],
-      ],
+    // One case per profile of a cycle; the verification case also shows that stages after the
+    // first are checked. Which capability each stage needs is guaranteed by requiredCapabilitiesFor.
+    const cases: [string, string, StageState, AgentCapability, string][] = [
+      ['implementation profile', 'primary-profile', 'VERIFYING', 'commandExecution', 'adapter-a'],
+      ['review profile', 'review-profile', 'REVIEWING', 'workspaceRead', 'adapter-b'],
     ];
-    for (const [name, profiles, profileId, stage, missing] of cases) {
-      test(name, async () => {
-        await boot(profiles);
+    for (const [name, profileId, stage, omitted, adapter] of cases) {
+      test(`${name} without a capability its stage needs`, async () => {
+        const capabilities = AGENT_CAPABILITIES.filter((capability) => capability !== omitted);
+        await boot({ ...PROFILES, [profileId]: { adapter, capabilities } });
         await bind();
         const error = await rejectsWith(start(), 'AGENT_CAPABILITY_MISMATCH');
         assert.equal(error.details['profileId'], profileId);
         assert.equal(error.details['stage'], stage);
-        assert.deepEqual(error.details['missing'], missing);
+        assert.deepEqual(
+          error.details['missing'],
+          requiredCapabilitiesFor(stage).filter((capability) => !capabilities.includes(capability)),
+        );
         assert.equal(invoked(), 0);
         const status = await call<{ openWorkItems: { cycle: unknown }[] }>(app(), 'get_status');
         assert.equal(status.openWorkItems[0]?.cycle, null, 'no cycle was created');

@@ -4,12 +4,14 @@ import type { CycleId, RunId, WorkItemId } from '../domain/ids.ts';
 import { requiredCapabilitiesFor } from '../domain/agent-profile.ts';
 import type { StageState } from '../domain/cycle.ts';
 import type { AgentRun, RunPurpose } from '../domain/records.ts';
+import { assertOperationAllowed, type OperationClass } from '../domain/storage.ts';
+import { assertWorkItemCanRun, requireBoundWorkspace } from '../domain/work-item.ts';
 import { filesystemPolicyFor } from '../domain/sandbox.ts';
 import { assertWorkspaceMatches, compareWorkspace } from '../domain/workspace.ts';
 import { nowIso, type Dependencies } from './dependencies.ts';
 import { requirePlan } from './plans.ts';
-import { MAX_RESULT_BYTES } from './agent-results.ts';
-import { assertCapable, requireProfile } from './agent-profiles.ts';
+import { MAX_RESULT_BYTES, resultJsonSchema, type ResultPurpose } from './agent-results.ts';
+import { assertCapable, assertCommandAvailable, requireProfile } from './agent-profiles.ts';
 import type { AgentAdapter, AgentRunRequest, OutputWriter, RunningProcess } from './ports.ts';
 import { composeAgentPrompt } from './prompt.ts';
 import { runCacheRefs, type StorageService } from './storage.ts';
@@ -28,22 +30,47 @@ export type StageOutput =
   /** Orvia could not keep the output (write error, or the file is gone). */
   | { readonly kind: 'lost' };
 
-export interface StartRunInput {
+const STAGE_PURPOSE: Record<StageState, Exclude<RunPurpose, 'manual'> & ResultPurpose> = {
+  IMPLEMENTING: 'implementation',
+  VERIFYING: 'verification',
+  REVIEWING: 'review',
+  FIXING: 'fix',
+};
+
+export type StartRunInput = {
   readonly workItemId: WorkItemId;
   readonly profileId: string;
   readonly instructions: string;
-  readonly purpose?: RunPurpose;
-  readonly cycleId?: CycleId | null;
-  /**
-   * The cycle stage this run performs. The profile must have the stage's required
-   * capabilities, and the run is granted exactly those. A manual run gets whatever the
-   * profile has.
-   */
-  readonly stage?: StageState;
-  /** JSON Schema the agent's final answer must match; the result is passed to onFinished. */
-  readonly resultSchema?: Record<string, unknown>;
   /** Runs inside the transaction that records the run, before the agent starts. */
   readonly withinTransaction?: (run: AgentRun) => void;
+} & (
+  | {
+      /** A human-started run: the profile's own capabilities, no structured result. */
+      readonly kind: 'manual';
+    }
+  | {
+      /**
+       * A cycle's stage run. The profile must have the stage's required capabilities and the
+       * run is granted exactly those. The stage fixes the purpose and the result schema, and
+       * the result is passed to the finished-run listener.
+       */
+      readonly kind: 'cycleStage';
+      readonly cycleId: CycleId;
+      readonly stage: StageState;
+    }
+);
+
+/** The gates every operation that starts agent work passes before it runs. */
+export async function assertAgentWorkAllowed(
+  runs: RunSupervisor,
+  storage: StorageService,
+  operation: string,
+  operationClass: OperationClass,
+): Promise<void> {
+  if (runs.recoveryStatus().state === 'incomplete') {
+    throw recoveryIncompleteError(runs.recoveryStatus(), operation);
+  }
+  assertOperationAllowed(await storage.assess(), operationClass);
 }
 
 export type RecoveryResult =
@@ -147,56 +174,51 @@ export class RunSupervisor implements RunControl {
    * was started with a result schema. Awaited before the run counts as recorded, so shutdown
    * sees its effects.
    */
-  onFinished: ((run: AgentRun, output: StageOutput) => Promise<void>) | null = null;
+  #onFinished: ((run: AgentRun, output: StageOutput) => Promise<void>) | null = null;
+
+  onFinished(listener: (run: AgentRun, output: StageOutput) => Promise<void>): void {
+    if (this.#onFinished !== null)
+      throw new OrviaError('INTERNAL', 'a run listener is already set');
+    this.#onFinished = listener;
+  }
 
   async start(input: StartRunInput): Promise<AgentRun> {
     const deps = this.#deps;
-    const purpose = input.purpose ?? 'manual';
+    const stage = input.kind === 'cycleStage' ? input.stage : undefined;
+    const purpose = stage === undefined ? 'manual' : STAGE_PURPOSE[stage];
+    const resultSchema = stage === undefined ? undefined : resultJsonSchema(STAGE_PURPOSE[stage]);
+    const cycleId = input.kind === 'cycleStage' ? input.cycleId : null;
     if (this.#closing) {
       throw new OrviaError('INVALID_STATE_TRANSITION', 'the daemon is shutting down');
     }
     const item = requireWorkItem(deps, input.workItemId);
     this.#assertNotStopping(item.id);
-    if (purpose === 'manual' && deps.store.cycles.active(item.id) !== null) {
-      throw new OrviaError(
-        'CYCLE_ACTIVE',
-        `work item ${item.id} has an active cycle; control it with the cycle operations`,
-        { workItemId: item.id },
-      );
-    }
-    if (item.status !== 'active') {
-      throw new OrviaError(
-        'INVALID_STATE_TRANSITION',
-        `work item ${item.id} is ${item.status}; only active work items can run`,
-        { workItemId: item.id, status: item.status },
-      );
-    }
-    const workspace = item.workspace;
-    if (workspace === null) {
-      throw new OrviaError('WORKSPACE_NOT_BOUND', `work item ${item.id} has no bound worktree`, {
-        workItemId: item.id,
-      });
-    }
+    const assertNoCycleForManualRun = (): void => {
+      if (input.kind === 'manual' && deps.store.cycles.active(item.id) !== null) {
+        throw new OrviaError(
+          'CYCLE_ACTIVE',
+          `work item ${item.id} has an active cycle; control it with the cycle operations`,
+          { workItemId: item.id },
+        );
+      }
+    };
+    assertNoCycleForManualRun();
+    assertWorkItemCanRun(item);
+    const workspace = requireBoundWorkspace(item);
     const profile = requireProfile(deps.profiles, input.profileId);
-    if (input.stage !== undefined) assertCapable(profile, input.stage);
+    if (stage !== undefined) assertCapable(profile, stage);
     const granted =
-      input.stage === undefined
+      stage === undefined
         ? profile.capabilities.filter((capability) => capability !== 'structuredResult')
-        : requiredCapabilitiesFor(input.stage);
-    if ((await deps.launcher.resolveCommand(profile.command)) === null) {
-      throw new OrviaError(
-        'AGENT_UNAVAILABLE',
-        `agent profile ${profile.id}: command not found: ${profile.command}`,
-        { profileId: profile.id, command: profile.command },
-      );
-    }
+        : requiredCapabilitiesFor(stage);
+    await assertCommandAvailable(profile, deps.launcher);
 
     assertWorkspaceMatches(item.id, workspace, await deps.git.observe(workspace.worktreeRoot));
 
     const refs = runCacheRefs(`runs/${randomUUID()}.log`);
     const outputRef = refs.log;
-    const resultRef = input.resultSchema === undefined ? null : refs.result;
-    const schemaRef = input.resultSchema === undefined ? null : refs.schema;
+    const resultRef = resultSchema === undefined ? null : refs.result;
+    const schemaRef = resultSchema === undefined ? null : refs.schema;
     // One byte past what the adapter needs, so an oversized result is seen as oversized.
     const resultBytes = profile.adapter.resultStdoutBytes(MAX_RESULT_BYTES) + 1;
     const recordRun = () =>
@@ -206,16 +228,8 @@ export class RunSupervisor implements RunControl {
         }
         const fresh = requireWorkItem(deps, item.id);
         this.#assertNotStopping(fresh.id);
-        if (fresh.status !== 'active') {
-          throw new OrviaError(
-            'INVALID_STATE_TRANSITION',
-            `work item ${item.id} is ${fresh.status}`,
-            {
-              workItemId: item.id,
-              status: fresh.status,
-            },
-          );
-        }
+        assertWorkItemCanRun(fresh);
+        assertNoCycleForManualRun();
         if (fresh.workspace === null || compareWorkspace(workspace, fresh.workspace).length > 0) {
           throw new OrviaError('WORKSPACE_MISMATCH', `work item ${item.id} was rebound`, {
             workItemId: item.id,
@@ -230,7 +244,7 @@ export class RunSupervisor implements RunControl {
               profileId: profile.id,
               outputRef,
               purpose,
-              cycleId: input.cycleId ?? null,
+              cycleId,
               now: nowIso(deps),
             });
             input.withinTransaction?.(inserted);
@@ -252,17 +266,17 @@ export class RunSupervisor implements RunControl {
     let resultWriter: OutputWriter | null = null;
     let inserted: ReturnType<typeof recordRun>;
     try {
-      if (input.resultSchema !== undefined && schemaRef !== null && resultRef !== null) {
+      if (resultSchema !== undefined && schemaRef !== null && resultRef !== null) {
         // The result's space is set aside before the agent starts, so verbose logging cannot
         // crowd out the structured result the cycle depends on.
         resultWriter = deps.cache.createWriter(resultRef, { reserveBytes: resultBytes });
-        const schema = new TextEncoder().encode(JSON.stringify(input.resultSchema));
+        const schema = new TextEncoder().encode(JSON.stringify(resultSchema));
         const schemaWriter = deps.cache.createWriter(schemaRef, {
           reserveBytes: schema.byteLength,
         });
         schemaWriter.write(schema);
         await schemaWriter.close();
-        result = { schema: input.resultSchema, schemaPath: deps.cache.absolutePath(schemaRef) };
+        result = { schema: resultSchema, schemaPath: deps.cache.absolutePath(schemaRef) };
       }
       inserted = recordRun();
     } catch (error) {
@@ -272,18 +286,48 @@ export class RunSupervisor implements RunControl {
     }
     const { run, prompt } = inserted;
 
-    const invocation = profile.adapter.buildInvocation(profile.command, {
-      policy: filesystemPolicyFor(workspace),
-      prompt,
-      capabilities: granted,
-      result,
-    });
-    // The structured result is read from stdout alone; the log keeps both streams.
-    const writer = deps.cache.createWriter(outputRef);
-    const process = deps.launcher.launch(invocation, (chunk, stream) => {
-      writer.write(chunk);
-      if (stream === 'stdout') resultWriter?.write(chunk);
-    });
+    let writer: OutputWriter | null = null;
+    let process: RunningProcess;
+    try {
+      const invocation = profile.adapter.buildInvocation(profile.command, {
+        policy: filesystemPolicyFor(workspace),
+        prompt,
+        capabilities: granted,
+        result,
+      });
+      // The structured result is read from stdout alone; the log keeps both streams.
+      const logWriter = deps.cache.createWriter(outputRef);
+      writer = logWriter;
+      process = deps.launcher.launch(invocation, (chunk, stream) => {
+        logWriter.write(chunk);
+        if (stream === 'stdout') resultWriter?.write(chunk);
+      });
+    } catch (error) {
+      // Synchronous, so the run is never left `running` without a process to stop.
+      try {
+        deps.store.transaction(
+          () =>
+            deps.store.runs.finish(run.id, {
+              status: 'failed',
+              exitCode: null,
+              outputBytes: 0,
+              outputTruncated: false,
+              now: nowIso(deps),
+            }),
+          'reserve',
+        );
+      } catch (finishError) {
+        deps.logger.error('could not record a run that failed to start', {
+          runId: run.id,
+          error: finishError instanceof Error ? finishError.message : String(finishError),
+        });
+      }
+      await writer?.close();
+      await resultWriter?.close();
+      await deps.cache.remove([refs.result, refs.schema]);
+      throw error;
+    }
+    const logWriter = writer;
     const active: ActiveRun = { runId: run.id, process, stopReason: null };
     this.#active.set(item.id, active);
     deps.logger.info('agent run started', {
@@ -294,7 +338,7 @@ export class RunSupervisor implements RunControl {
 
     const recorded = process.exited
       .then(async (exit) => {
-        const output = await writer.close();
+        const output = await logWriter.close();
         const resultOutput = (await resultWriter?.close()) ?? null;
         const status =
           active.stopReason ??
@@ -323,14 +367,16 @@ export class RunSupervisor implements RunControl {
           spawnError: exit.spawnError,
         });
         this.#forget(item.id, run.id);
-        if (this.onFinished !== null) {
-          const finished = deps.store.runs.get(run.id);
-          if (finished !== null) {
-            await this.onFinished(
-              finished,
-              await this.#stageOutput(profile.adapter, resultRef, resultBytes, resultOutput),
-            );
-          }
+        const finished = deps.store.runs.get(run.id);
+        if (this.#onFinished !== null && finished !== null) {
+          await this.#onFinished(
+            finished,
+            await this.#stageOutput(profile.adapter, resultRef, resultBytes, resultOutput),
+          );
+        } else if (this.#onFinished === null && cycleId !== null) {
+          deps.logger.error('the result of a cycle run was dropped: no listener', {
+            runId: run.id,
+          });
         }
       })
       .catch((error: unknown) => {

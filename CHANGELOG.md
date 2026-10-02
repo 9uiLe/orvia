@@ -77,6 +77,14 @@ Before 1.0.0, minor versions may contain breaking changes.
   refused with `RECOVERY_INCOMPLETE` until cleanup or a larger budget and a restart. After each
   migration, the reserve is re-checked against the actual schema before COMMIT, and a migration
   that leaves no reserve is rolled back with `MIGRATION_STORAGE_REQUIRED`.
+- A run whose agent fails to launch after the run is recorded is finished as `failed`; it no
+  longer stays `running` and blocks the Work Item with `RUN_IN_PROGRESS` until a restart.
+- A cancelled cycle no longer keeps the `resumeStage` of the paused, blocked, or escalated state
+  it was cancelled from.
+- `start_run` re-checks for an active cycle when it records the run, so a cycle started while
+  the run was being prepared refuses it with `CYCLE_ACTIVE`.
+- `doctor` takes the minimum Node.js version from `engines` in `package.json` and compares the
+  patch version too.
 
 ### Changed
 

@@ -4,12 +4,12 @@ import { idPattern, type EntityKind, type IdByKind } from '../domain/ids.ts';
 import { describeProfiles } from './agent-profiles.ts';
 import { CYCLE_MODES } from '../domain/cycle.ts';
 import { PLAN_STATUSES } from '../domain/plan.ts';
-import { assertOperationAllowed, type OperationClass } from '../domain/storage.ts';
+import type { OperationClass } from '../domain/storage.ts';
 import { WORK_ITEM_STATUSES } from '../domain/work-item.ts';
 import type { Application } from './application.ts';
 import { archivePlan, createPlan, getPlan, listPlans, updatePlan } from './plans.ts';
 import { addContext, recordDecision, submitFeedback } from './records.ts';
-import { recoveryIncompleteError } from './runs.ts';
+import { assertAgentWorkAllowed } from './runs.ts';
 import { getStatus } from './status.ts';
 import {
   bindWorkspace,
@@ -217,7 +217,7 @@ export const OPERATIONS: readonly Operation[] = [
       profileId: text('Agent Profile to run (see list_agent_profiles)'),
       instructions: text('What the agent should do in this run'),
     }),
-    handler: (app, input) => app.runs.start(input),
+    handler: (app, input) => app.runs.start({ kind: 'manual', ...input }),
   }),
   defineOperation({
     name: 'list_agent_profiles',
@@ -439,10 +439,9 @@ export async function invokeOperation(
   const gated = operation.operationClass === 'write' || operation.operationClass === 'agent_run';
   // While startup recovery is incomplete the daemon only serves inspection, controls, and
   // maintenance; new work would build on run records that still claim to be running.
-  if (gated && app.runs.recoveryStatus().state === 'incomplete') {
-    throw recoveryIncompleteError(app.runs.recoveryStatus(), operation.name);
+  if (gated) {
+    await assertAgentWorkAllowed(app.runs, app.storage, operation.name, operation.operationClass);
   }
-  if (gated) assertOperationAllowed(await app.storage.assess(), operation.operationClass);
   const result = await operation.run(app, input);
   if (gated) app.scheduleCleanupIfNeeded();
   return result;

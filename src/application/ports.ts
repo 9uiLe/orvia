@@ -56,8 +56,8 @@ export interface WorkItemPatch {
   title?: string;
   description?: string;
   status?: WorkItemStatus;
-  branch?: string | null;
   prUrl?: string | null;
+  /** Also sets the Work Item's branch to the identity's; the two share one column. */
   workspace?: WorkspaceIdentity | null;
 }
 

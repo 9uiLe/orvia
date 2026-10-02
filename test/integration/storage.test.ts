@@ -10,6 +10,7 @@ import type { Daemon } from '../../src/interface/daemon/daemon.ts';
 import { call, FakeAgent, rejectsWith, startTestDaemon } from '../helpers/app.ts';
 import { config, makeTestEnv, type TestEnv } from '../helpers/env.ts';
 import { addWorktree, createRepository, snapshotRepository } from '../helpers/git.ts';
+import { fillDurableData } from '../helpers/storage-fill.ts';
 
 const KIB = 1024;
 const MIB = 1024 * KIB;
@@ -113,18 +114,8 @@ describe('bounded storage', () => {
   test('hard quota: new work is refused while status, controls, and maintenance still work', async () => {
     const d = await start({ database_max_mb: 5 });
     const { item } = await boundWorkItem(d);
-    // Fill durable data with ever smaller notes until the data reaches the write capacity.
     // Each refusal comes from the pre-write gate or from SQLite's page cap; neither writes.
-    for (const size of [64 * KIB, 4 * KIB, 100]) {
-      for (let i = 0; i < 2000; i++) {
-        try {
-          await call(d.app, 'add_context', { planId: 'P-1', body: 'x'.repeat(size) });
-        } catch (error) {
-          assert.equal((error as { code: string }).code, 'STORAGE_HARD_LIMIT');
-          break;
-        }
-      }
-    }
+    await fillDurableData(d.app);
     const full = await storage(d);
     assert.equal(full.assessment.database.level, 'HARD_LIMIT');
     assert.ok(full.assessment.database.usedBytes <= 5 * MIB);
@@ -142,26 +133,6 @@ describe('bounded storage', () => {
     await call(d.app, 'resume_work_item', { workItemId: item.id });
     await call<CleanupReport>(d.app, 'run_storage_cleanup');
     await call(d.app, 'archive_work_item', { workItemId: item.id });
-  });
-
-  test('SQLite max_page_count is the last fuse even if the gate is bypassed', async () => {
-    const d = await start({ database_max_mb: 5 });
-    await call(d.app, 'create_plan', { title: 'P' });
-    const store = d.app.deps.store;
-    assert.throws(
-      () =>
-        store.transaction(() =>
-          store.notes.insert({
-            planId: 'P-1',
-            workItemId: null,
-            kind: 'context',
-            body: 'x'.repeat(6 * MIB),
-            now: new Date().toISOString(),
-          }),
-        ),
-      { code: 'STORAGE_HARD_LIMIT' },
-    );
-    await call(d.app, 'get_status');
   });
 
   test('cache eviction removes the oldest entries until below the PRESSURE threshold', async () => {

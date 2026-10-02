@@ -333,7 +333,7 @@ export class SqliteStore implements Store {
             patch.title ?? current.title,
             patch.description ?? current.description,
             patch.status ?? current.status,
-            patch.branch === undefined ? current.branch : patch.branch,
+            workspace === null ? current.branch : workspace.branch,
             patch.prUrl === undefined ? current.prUrl : patch.prUrl,
             workspace?.repositoryCommonDir ?? null,
             workspace?.repositoryCommonDirFileId ?? null,
