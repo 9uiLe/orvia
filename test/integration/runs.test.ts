@@ -6,7 +6,7 @@ import type { AgentRun } from '../../src/domain/records.ts';
 import type { WorkItem } from '../../src/domain/work-item.ts';
 import type { Daemon } from '../../src/interface/daemon/daemon.ts';
 import { call, FakeAgent, rejectsWith, startTestDaemon, until } from '../helpers/app.ts';
-import { makeTestEnv, type TestEnv } from '../helpers/env.ts';
+import { makeTestEnv, silentLogger, type TestEnv } from '../helpers/env.ts';
 import { addWorktree, createRepository } from '../helpers/git.ts';
 
 describe('agent runs', () => {
@@ -94,6 +94,23 @@ describe('agent runs', () => {
     const state = await runState(run.id);
     assert.equal(state.status, 'failed');
     assert.equal(state.exitCode, 3);
+  });
+
+  test('stopping the daemon during a run logs no error', async () => {
+    const errors: string[] = [];
+    await daemon.close();
+    daemon = await startTestDaemon(env, {
+      agent,
+      logger: { ...silentLogger, error: (message) => errors.push(message) },
+    });
+    agent.mode = `wait:${release}`;
+    const run = await start();
+    await until(() => existsSync(join(env.paths.cacheDir, run.outputRef ?? '')));
+    await daemon.close();
+    // Cleanup that would run after the database is closed is skipped.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(errors, []);
+    daemon = await startTestDaemon(env, { agent });
   });
 
   test('runs left running by a stopped daemon are marked interrupted on restart', async () => {

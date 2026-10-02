@@ -345,7 +345,8 @@ export class RunSupervisor implements RunControl {
       });
     this.#recorded.set(run.id, recorded);
     recorded
-      .then(() => this.#storage.cleanupIfNeeded())
+      // A run stopped by shutdown finishes after the database is closed.
+      .then(() => (this.#closing ? null : this.#storage.cleanupIfNeeded()))
       .catch((error: unknown) => {
         deps.logger.error('storage cleanup after run failed', {
           error: error instanceof Error ? error.message : String(error),
