@@ -273,7 +273,10 @@ relaunched); `cancel_cycle`; and a claude implementation profile refused with
 Known adapter limitations:
 
 - `codex`: without `commandExecution`, Codex's read-only sandbox still runs commands; none of
-  them can write. A codex review profile ran the tests during its review.
+  them can write. A codex review profile ran the tests during its review. With
+  `commandExecution` (verification), Codex runs in its `workspace-write` sandbox, because test
+  runners write build output; the verifier is told not to change source files, but the sandbox
+  does not prevent it.
 - `claude`: Orvia does not grant Claude Code's Bash tool, so the adapter does not declare
   `commandExecution`, and a claude profile cannot verify. Whether Bash runs depends on your own
   Claude Code permission settings; on the validation machine it did run under `acceptEdits`.
@@ -390,6 +393,27 @@ ln -sf "$PWD/dist/interface/cli/main.js" ~/.local/bin/orvia
 ```
 
 ## Quick start
+
+Define the Agent Profiles you want to use in `config.json` (path in
+[Storage configuration](#storage-configuration)); this example binds them to the bundled
+adapters:
+
+```json
+{
+  "agents": {
+    "profiles": {
+      "primary": { "adapter": "codex" },
+      "reviewer": { "adapter": "claude" }
+    }
+  },
+  "orchestration": {
+    "default_implementation_profile": "primary",
+    "default_review_profile": "reviewer"
+  }
+}
+```
+
+The daemon reads the configuration when it starts; restart it after editing.
 
 ```sh
 orvia daemon &                     # foreground process; logs JSON lines to stderr
