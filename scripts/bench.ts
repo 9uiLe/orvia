@@ -68,7 +68,23 @@ try {
     await invokeOperation(app, 'record_decision', { planId: `P-${p}`, title: 'd', body: 'b' });
     await invokeOperation(app, 'add_context', { planId: `P-${p}`, body: 'context' });
     for (let w = 0; w < perPlan; w++) {
-      await invokeOperation(app, 'create_work_item', { planId: `P-${p}`, title: `W ${w}` });
+      const item = (await invokeOperation(app, 'create_work_item', {
+        planId: `P-${p}`,
+        title: `W ${w}`,
+      })) as { id: `W-${number}` };
+      // Every Work Item has the most cycles get_status can show for it: one active.
+      app.deps.store.transaction(() =>
+        app.deps.store.cycles.insert({
+          workItemId: item.id,
+          mode: 'implement',
+          state: 'IMPLEMENTING',
+          maxAutoFixRounds: 3,
+          implementationAgent: 'codex',
+          reviewAgent: 'claude',
+          instructions: 'benchmark',
+          now: new Date().toISOString(),
+        }),
+      );
     }
   }
   const client = new IpcClient(paths.socketPath);
@@ -82,7 +98,7 @@ try {
 
   console.log(
     `Orvia benchmark — node ${process.versions.node}, ${process.platform}/${process.arch}, ` +
-      `${plans} plans × ${perPlan} work items, ${iterations} iterations`,
+      `${plans} plans × ${perPlan} work items (one active cycle each), ${iterations} iterations`,
   );
   for (const [label, operation, input] of cases) {
     console.log(

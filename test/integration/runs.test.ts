@@ -5,16 +5,9 @@ import { afterEach, beforeEach, describe, test } from 'node:test';
 import type { AgentRun } from '../../src/domain/records.ts';
 import type { WorkItem } from '../../src/domain/work-item.ts';
 import type { Daemon } from '../../src/interface/daemon/daemon.ts';
-import { call, FakeAgent, rejectsWith, startTestDaemon } from '../helpers/app.ts';
+import { call, FakeAgent, rejectsWith, startTestDaemon, until } from '../helpers/app.ts';
 import { makeTestEnv, type TestEnv } from '../helpers/env.ts';
 import { addWorktree, createRepository } from '../helpers/git.ts';
-
-async function until(condition: () => boolean): Promise<void> {
-  for (let i = 0; i < 500 && !condition(); i++) {
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  assert.ok(condition(), 'condition was not reached');
-}
 
 describe('agent runs', () => {
   let env: TestEnv;

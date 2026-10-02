@@ -1,3 +1,6 @@
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Application } from '../../src/application/application.ts';
 import { invokeOperation } from '../../src/application/operations.ts';
@@ -16,23 +19,65 @@ import { config as defaultConfig, silentLogger, type TestEnv } from './env.ts';
 
 export const FAKE_AGENT = fileURLToPath(new URL('../fixtures/fake-agent.ts', import.meta.url));
 
-/** Records every invocation so tests can assert where (and whether) an agent was started. */
+/** One scripted agent run: what it prints to stdout, how it exits, and whether it waits. */
+export interface FakeStep {
+  /** Serialized to JSON as the structured result on stdout. */
+  readonly result?: unknown;
+  /** Printed verbatim instead of `result`, for malformed output. */
+  readonly stdout?: string;
+  readonly exitCode?: number;
+  /** Waits until this file exists before writing stdout (or until terminated). */
+  readonly waitFor?: string;
+  /** Waits until this file exists after writing stdout, before exiting. */
+  readonly holdFor?: string;
+}
+
+export type FakeRole = 'implementation' | 'verification' | 'review' | 'fix';
+
+/**
+ * Records every invocation so tests can assert where (and whether) an agent was started.
+ * Cycle stages are answered from `script`, per role, in order; the role is read from the
+ * prompt's "Role:" line. Other runs use `mode`.
+ */
 export class FakeAgent implements AgentAdapter {
-  readonly name = 'fake';
+  readonly name: string;
   readonly command = process.execPath;
-  readonly invocations: AgentInvocation[] = [];
+  readonly invocations: (AgentInvocation & { role: FakeRole | null; access: string })[] = [];
   mode = 'echo';
+  script: Partial<Record<FakeRole, FakeStep[]>> = {};
+  readonly #stepDir: string;
+
+  constructor(name = 'fake', stepDir = mkdtempSync(join(tmpdir(), 'orvia-fake-'))) {
+    this.name = name;
+    this.#stepDir = stepDir;
+  }
 
   buildInvocation: AgentAdapter['buildInvocation'] = (request) => {
+    const role = /Role: (?:independent )?(implementation|verification|review|fix)/.exec(
+      request.prompt,
+    )?.[1] as FakeRole | undefined;
+    let args = [FAKE_AGENT, this.mode];
+    if (role !== undefined) {
+      const step = this.script[role]?.shift() ?? {
+        exitCode: 99,
+        stdout: `no scripted ${role} step`,
+      };
+      const file = join(this.#stepDir, `${this.name}-step-${String(this.invocations.length)}.json`);
+      writeFileSync(file, JSON.stringify(step));
+      args = [FAKE_AGENT, `step:${file}`];
+    }
     const invocation = {
       command: this.command,
-      args: [FAKE_AGENT, this.mode],
+      args,
       cwd: request.policy.workingDirectory,
       stdin: request.prompt,
     };
-    this.invocations.push(invocation);
+    this.invocations.push({ ...invocation, role: role ?? null, access: request.access });
     return invocation;
   };
+
+  extractResult: AgentAdapter['extractResult'] = (stdout) =>
+    stdout.trim() === '' ? null : stdout.trim();
 }
 
 export interface TestDaemonOptions {
@@ -40,6 +85,8 @@ export interface TestDaemonOptions {
   readonly migrations?: readonly Migration[];
   readonly clock?: Clock;
   readonly agent?: FakeAgent;
+  /** Additional agents, e.g. a separate reviewer. */
+  readonly agents?: readonly FakeAgent[];
   readonly listen?: boolean;
   readonly launcher?: ProcessLauncher;
   readonly logger?: Logger;
@@ -50,7 +97,7 @@ export function startTestDaemon(env: TestEnv, options: TestDaemonOptions = {}): 
     paths: env.paths,
     config: options.config ?? defaultConfig(),
     logger: options.logger ?? silentLogger,
-    agents: [options.agent ?? new FakeAgent()],
+    agents: [options.agent ?? new FakeAgent(), ...(options.agents ?? [])],
     listen: options.listen ?? false,
     ...(options.migrations === undefined ? {} : { migrations: options.migrations }),
     ...(options.clock === undefined ? {} : { clock: options.clock }),
@@ -75,4 +122,12 @@ export async function rejectsWith(promise: Promise<unknown>, code: string): Prom
     throw new Error(`expected ${code}, got ${String(error)}`, { cause: error });
   }
   throw new Error(`expected ${code}, but the call succeeded`);
+}
+
+/** Polls until `condition` holds, failing after about five seconds. */
+export async function until(condition: () => boolean): Promise<void> {
+  for (let i = 0; i < 500 && !condition(); i++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  if (!condition()) throw new Error('condition was not reached');
 }
