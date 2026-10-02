@@ -208,15 +208,25 @@ export interface CleanupFailure {
   readonly message: string;
 }
 
+export interface WriterOptions {
+  /**
+   * Bytes set aside from the shared cache budget when the writer is created; the writer uses
+   * them before anything else and never more. Creating it fails with RESULT_STORAGE_EXHAUSTED
+   * if they are not available.
+   */
+  readonly reserveBytes?: number;
+}
+
 export interface OutputWriter {
   write(chunk: Uint8Array): void;
-  close(): Promise<{ bytes: number; truncated: boolean }>;
+  /** `truncated`: output beyond the budget or reservation was dropped; `failed`: a write error. */
+  close(): Promise<{ bytes: number; truncated: boolean; failed: boolean }>;
 }
 
 /** Ephemeral, size-capped storage for agent output and other disposable data. */
 export interface EphemeralStore {
   measureBytes(): Promise<number>;
-  createWriter(ref: string): OutputWriter;
+  createWriter(ref: string, options?: WriterOptions): OutputWriter;
   readTail(ref: string, maxBytes: number): Promise<string | null>;
   /** The first `maxBytes` bytes of an entry, or null if it does not exist. */
   readHead(ref: string, maxBytes: number): Promise<string | null>;
