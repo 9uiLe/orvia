@@ -14,7 +14,7 @@ export interface OpenWorkItemSummary {
   readonly status: WorkItemStatus;
   readonly branch: string | null;
   readonly worktreeRoot: string | null;
-  readonly currentRun: Pick<AgentRun, 'id' | 'agent' | 'status' | 'startedAt'> | null;
+  readonly currentRun: Pick<AgentRun, 'id' | 'profileId' | 'status' | 'startedAt'> | null;
   /** The active orchestration cycle; details (findings, history) via get_cycle. */
   readonly cycle: Pick<Cycle, 'id' | 'state' | 'reason' | 'iteration' | 'currentRunId'> | null;
 }
@@ -79,7 +79,7 @@ export async function getStatus(
       currentRun:
         run === undefined
           ? null
-          : { id: run.id, agent: run.agent, status: run.status, startedAt: run.startedAt },
+          : { id: run.id, profileId: run.profileId, status: run.status, startedAt: run.startedAt },
       cycle: summarizeCycle(cycles.get(item.id)),
     };
   });

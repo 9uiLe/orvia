@@ -33,6 +33,11 @@ export const CYCLE_REASONS = [
   'RUN_INTERRUPTED',
   'VERIFICATION_BLOCKED',
   'START_FAILED',
+  'AGENT_PROFILE_NOT_FOUND',
+  'AGENT_CAPABILITY_MISMATCH',
+  'AGENT_UNAVAILABLE',
+  'RESULT_STORAGE_EXHAUSTED',
+  'CHANGES_TOO_LARGE',
   'STORAGE_HARD_LIMIT',
   'PAUSED_BY_HUMAN',
   'CANCELLED_BY_HUMAN',
@@ -58,9 +63,11 @@ export interface Cycle {
   /** Automatic fixes since the cycle started or a human last resumed it. */
   readonly autoFixRounds: number;
   readonly maxAutoFixRounds: number;
-  readonly implementationAgent: string;
-  readonly reviewAgent: string;
+  readonly implementationProfileId: string;
+  readonly reviewProfileId: string;
   readonly instructions: string;
+  /** The commit the cycle's changes are reviewed against. */
+  readonly baseCommit: string;
   readonly currentRunId: RunId | null;
   readonly startedAt: string;
   readonly updatedAt: string;

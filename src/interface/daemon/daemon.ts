@@ -2,7 +2,8 @@ import type { Server } from 'node:http';
 import { Application } from '../../application/application.ts';
 import { isOrviaError } from '../../domain/errors.ts';
 import type { AgentAdapter, Clock, Logger, ProcessLauncher } from '../../application/ports.ts';
-import { claudeAdapter, codexAdapter } from '../../infrastructure/agents/adapters.ts';
+import { buildAgentProfiles } from '../../application/agent-profiles.ts';
+import { BUNDLED_ADAPTERS } from '../../infrastructure/agents/adapters.ts';
 import { NodeProcessLauncher } from '../../infrastructure/agents/process-launcher.ts';
 import { FileCache } from '../../infrastructure/cache/file-cache.ts';
 import {
@@ -27,7 +28,8 @@ export interface DaemonOptions {
   readonly paths: OrviaPaths;
   readonly config?: OrviaConfig;
   readonly migrations?: readonly Migration[];
-  readonly agents?: readonly AgentAdapter[];
+  /** Adapters that profiles can use; the bundled ones by default. */
+  readonly adapters?: readonly AgentAdapter[];
   readonly launcher?: ProcessLauncher;
   readonly clock?: Clock;
   readonly logger?: Logger;
@@ -73,16 +75,16 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   let server: Server | null = null;
   try {
     const limits = storageLimits(config);
-    const agents = options.agents ?? [
-      codexAdapter(config.agents.codex?.command),
-      claudeAdapter(config.agents.claude?.command),
-    ];
+    const profiles = buildAgentProfiles(
+      config.agents.profiles,
+      options.adapters ?? BUNDLED_ADAPTERS,
+    );
     const app = new Application({
       store,
       databaseFiles: new SqliteDatabaseFiles(paths.databaseFile, paths.backupDir),
       cache: new FileCache(paths.cacheDir, limits.cacheMaxBytes),
       git: new GitWorkspaceInspector(new GitCli()),
-      agents: new Map(agents.map((adapter) => [adapter.name, adapter])),
+      profiles,
       launcher:
         options.launcher ??
         new NodeProcessLauncher({
@@ -92,7 +94,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       clock,
       logger,
       limits,
-      orchestration: { maxAutoFixRounds: config.orchestration.max_review_fix_cycles },
+      orchestration: {
+        maxAutoFixRounds: config.orchestration.max_review_fix_cycles,
+        defaultImplementationProfile: config.orchestration.default_implementation_profile ?? null,
+        defaultReviewProfile: config.orchestration.default_review_profile ?? null,
+        maxReviewDiffBytes: config.orchestration.max_review_diff_kb * 1024,
+      },
     });
     if (opened.migration.applied.length > 0) {
       logger.info('database migrated', {

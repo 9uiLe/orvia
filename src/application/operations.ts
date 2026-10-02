@@ -1,6 +1,7 @@
 import * as z from 'zod/v4';
 import { OrviaError } from '../domain/errors.ts';
 import { idPattern, type EntityKind, type IdByKind } from '../domain/ids.ts';
+import { describeProfiles } from './agent-profiles.ts';
 import { CYCLE_MODES } from '../domain/cycle.ts';
 import { PLAN_STATUSES } from '../domain/plan.ts';
 import { assertOperationAllowed, type OperationClass } from '../domain/storage.ts';
@@ -213,10 +214,25 @@ export const OPERATIONS: readonly Operation[] = [
     operationClass: 'agent_run',
     input: z.object({
       workItemId: id('workItem', 'Work Item id'),
-      agent: text('Agent adapter name, e.g. codex or claude'),
+      profileId: text('Agent Profile to run (see list_agent_profiles)'),
       instructions: text('What the agent should do in this run'),
     }),
     handler: (app, input) => app.runs.start(input),
+  }),
+  defineOperation({
+    name: 'list_agent_profiles',
+    title: 'List agent profiles',
+    description:
+      'The configured Agent Profiles: the adapter each uses, whether its command is available, its effective capabilities, and the cycle stages it can run; plus the default profiles for start_cycle.',
+    operationClass: 'read',
+    input: z.object({}),
+    handler: async (app) => ({
+      profiles: await describeProfiles(app.deps.profiles, app.deps.launcher),
+      defaults: {
+        implementationProfileId: app.deps.orchestration.defaultImplementationProfile,
+        reviewProfileId: app.deps.orchestration.defaultReviewProfile,
+      },
+    }),
   }),
   defineOperation({
     name: 'start_cycle',
@@ -228,8 +244,15 @@ export const OPERATIONS: readonly Operation[] = [
       workItemId: id('workItem', 'Work Item id'),
       mode: z.enum(CYCLE_MODES),
       instructions: text('What the change should achieve'),
-      implementationAgent: text('Agent adapter for implementing, verifying, and fixing'),
-      reviewAgent: text('Agent adapter for reviewing'),
+      implementationProfileId: text(
+        'Agent Profile for implementing, verifying, and fixing; defaults to orchestration.default_implementation_profile',
+      ).optional(),
+      reviewProfileId: text(
+        'Agent Profile for reviewing; defaults to orchestration.default_review_profile',
+      ).optional(),
+      baseRef: text(
+        'Commit or ref the changes are reviewed against; defaults to HEAD when the cycle starts',
+      ).optional(),
     }),
     handler: (app, input) => app.cycles.start(input),
   }),

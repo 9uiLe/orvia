@@ -18,6 +18,12 @@ import {
   resumeTarget,
   type CycleState,
 } from '../../src/domain/cycle.ts';
+import {
+  AGENT_CAPABILITIES,
+  effectiveCapabilities,
+  missingCapabilities,
+  requiredCapabilitiesFor,
+} from '../../src/domain/agent-profile.ts';
 import { OrviaError } from '../../src/domain/errors.ts';
 import {
   AUTO_FIX_CATEGORIES,
@@ -87,6 +93,49 @@ describe('cycle state machine', () => {
     for (const state of ['REVIEWING', 'HUMAN_REVIEW_READY', 'CANCELLED'] as const) {
       assert.throws(() => resumeTarget({ id: 'C-1', state, resumeStage: null }));
     }
+  });
+});
+
+describe('agent capabilities', () => {
+  test('each stage requires a fixed set of capabilities', () => {
+    assert.deepEqual(requiredCapabilitiesFor('IMPLEMENTING'), [
+      'workspaceRead',
+      'workspaceWrite',
+      'structuredResult',
+    ]);
+    assert.deepEqual(requiredCapabilitiesFor('VERIFYING'), [
+      'workspaceRead',
+      'commandExecution',
+      'structuredResult',
+    ]);
+    assert.deepEqual(requiredCapabilitiesFor('REVIEWING'), ['workspaceRead', 'structuredResult']);
+    assert.deepEqual(requiredCapabilitiesFor('FIXING'), [
+      'workspaceRead',
+      'workspaceWrite',
+      'structuredResult',
+    ]);
+  });
+
+  test('a profile narrows its adapter and cannot add to it', () => {
+    const adapter = ['workspaceRead', 'workspaceWrite', 'structuredResult'] as const;
+    assert.deepEqual(effectiveCapabilities(adapter, null), adapter);
+    assert.deepEqual(effectiveCapabilities(adapter, ['workspaceRead', 'commandExecution']), [
+      'workspaceRead',
+    ]);
+  });
+
+  test('missing capabilities are those required but not available', () => {
+    assert.deepEqual(
+      missingCapabilities(requiredCapabilitiesFor('VERIFYING'), [
+        'workspaceRead',
+        'workspaceWrite',
+      ]),
+      ['commandExecution', 'structuredResult'],
+    );
+    assert.deepEqual(
+      missingCapabilities(requiredCapabilitiesFor('REVIEWING'), [...AGENT_CAPABILITIES]),
+      [],
+    );
   });
 });
 
@@ -298,11 +347,14 @@ describe('agent adapters for cycle stages', () => {
   const schema = resultJsonSchema('review');
   const result = { schema, schemaPath: '/cache/runs/x.schema.json' };
 
+  const review = ['workspaceRead', 'structuredResult'] as const;
+  const verify = ['workspaceRead', 'commandExecution', 'structuredResult'] as const;
+
   test('codex reviews in a read-only sandbox and writes the result to stdout', () => {
-    const invocation = codexAdapter().buildInvocation({
+    const invocation = codexAdapter.buildInvocation('codex', {
       policy,
       prompt: 'p',
-      access: 'read-only',
+      capabilities: review,
       result,
     });
     assert.deepEqual(invocation.args, [
@@ -315,14 +367,31 @@ describe('agent adapters for cycle stages', () => {
       '/cache/runs/x.schema.json',
       '-',
     ]);
-    assert.equal(codexAdapter().extractResult(' {"a":1}\n'), '{"a":1}');
-    assert.equal(codexAdapter().extractResult('  \n'), null);
+    assert.equal(codexAdapter.extractResult(' {"a":1}\n'), '{"a":1}');
+    assert.equal(codexAdapter.extractResult('  \n'), null);
+    assert.equal(codexAdapter.resultStdoutBytes(100), 100);
+  });
+
+  test('codex runs checks in the workspace-write sandbox', () => {
+    const invocation = codexAdapter.buildInvocation('codex', {
+      policy,
+      prompt: 'p',
+      capabilities: verify,
+      result,
+    });
+    assert.deepEqual(invocation.args.slice(0, 3), ['exec', '--sandbox', 'workspace-write']);
   });
 
   test('claude reviews with read-only tools and reads structured_output from the envelope', () => {
-    const adapter = claudeAdapter('/opt/claude');
-    const review = adapter.buildInvocation({ policy, prompt: 'p', access: 'read-only', result });
-    assert.deepEqual(review.args, [
+    const adapter = claudeAdapter;
+    const reviewing = adapter.buildInvocation('/opt/claude', {
+      policy,
+      prompt: 'p',
+      capabilities: review,
+      result,
+    });
+    assert.equal(reviewing.command, '/opt/claude');
+    assert.deepEqual(reviewing.args, [
       '--print',
       '--tools',
       'Read,Grep,Glob',
@@ -333,7 +402,12 @@ describe('agent adapters for cycle stages', () => {
       '--json-schema',
       JSON.stringify(schema),
     ]);
-    const edit = adapter.buildInvocation({ policy, prompt: 'p', access: 'edit', result: null });
+    const edit = adapter.buildInvocation('claude', {
+      policy,
+      prompt: 'p',
+      capabilities: ['workspaceRead', 'workspaceWrite'],
+      result: null,
+    });
     assert.ok(edit.args.includes('acceptEdits'));
     assert.ok(!edit.args.includes('--allowedTools') && !edit.args.includes('Bash'));
 

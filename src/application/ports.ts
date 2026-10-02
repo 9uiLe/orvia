@@ -1,3 +1,4 @@
+import type { AgentCapability } from '../domain/agent-profile.ts';
 import type { CycleId, DecisionId, PlanId, ReviewId, RunId, WorkItemId } from '../domain/ids.ts';
 import type { Plan, PlanStatus } from '../domain/plan.ts';
 import type {
@@ -80,7 +81,7 @@ export interface RunRepository {
   /** Throws RUN_IN_PROGRESS when the Work Item already has a running run. */
   insert(input: {
     workItemId: WorkItemId;
-    agent: string;
+    profileId: string;
     outputRef: string;
     purpose: RunPurpose;
     cycleId: CycleId | null;
@@ -129,9 +130,10 @@ export interface CycleRepository {
     mode: CycleMode;
     state: StageState;
     maxAutoFixRounds: number;
-    implementationAgent: string;
-    reviewAgent: string;
+    implementationProfileId: string;
+    reviewProfileId: string;
     instructions: string;
+    baseCommit: string;
     now: string;
   }): Cycle;
   get(id: CycleId): Cycle | null;
@@ -251,13 +253,31 @@ export interface GitInspector {
   /** Returns null when the path does not exist or is not inside a git worktree. */
   observe(path: string): Promise<ObservedWorkspace | null>;
   listWorktrees(repositoryPath: string): Promise<WorktreeEntry[]>;
+  /** The commit `ref` names in the worktree, or null if it names none. */
+  resolveCommit(worktreeRoot: string, ref: string): Promise<string | null>;
+  /**
+   * The worktree's changes against `baseCommit`: status (including untracked files) and the
+   * diff of tracked files. Reads at most `maxBytes` of them; `complete` is false beyond that.
+   */
+  changes(worktreeRoot: string, baseCommit: string, maxBytes: number): Promise<ChangeEvidence>;
+}
+
+export interface ChangeEvidence {
+  readonly baseCommit: string;
+  readonly head: string | null;
+  readonly status: string;
+  readonly diff: string;
+  readonly complete: boolean;
 }
 
 export interface AgentRunRequest {
   readonly policy: FilesystemPolicy;
   readonly prompt: string;
-  /** `read-only` roles (review) must not change files; adapters map it to the agent's own controls. */
-  readonly access: 'edit' | 'read-only';
+  /**
+   * What this run may do. Adapters translate it into the CLI's own controls and grant nothing
+   * beyond it, so a review without workspaceWrite cannot edit.
+   */
+  readonly capabilities: readonly AgentCapability[];
   /** Present when the run must end with a JSON result matching `schema`. */
   readonly result: { readonly schema: Record<string, unknown>; readonly schemaPath: string } | null;
 }
@@ -269,11 +289,20 @@ export interface AgentInvocation {
   readonly stdin: string;
 }
 
-/** Agent-specific behaviour lives behind this interface and nowhere else. */
+/**
+ * How to run one kind of agent CLI. Everything specific to a concrete CLI (flags, sandbox and
+ * permission modes, the structured-output mechanism, output envelopes) lives behind this
+ * interface and nowhere else.
+ */
 export interface AgentAdapter {
-  readonly name: string;
-  readonly command: string;
-  buildInvocation(request: AgentRunRequest): AgentInvocation;
+  /** Referenced by Agent Profiles in the configuration. */
+  readonly id: string;
+  readonly defaultCommand: string;
+  /** What the adapter can make its CLI do; a profile can only narrow this. */
+  readonly capabilities: readonly AgentCapability[];
+  buildInvocation(command: string, request: AgentRunRequest): AgentInvocation;
+  /** Largest stdout Orvia must keep to read a structured result of up to `resultBytes`. */
+  resultStdoutBytes(resultBytes: number): number;
   /**
    * The structured result's JSON text from the agent's stdout, unwrapped from any
    * agent-specific envelope; null if the agent reported no result.

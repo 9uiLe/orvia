@@ -11,6 +11,7 @@ import type {
   Logger,
   ProcessLauncher,
 } from '../../src/application/ports.ts';
+import { AGENT_CAPABILITIES, type AgentCapability } from '../../src/domain/agent-profile.ts';
 import { OrviaError } from '../../src/domain/errors.ts';
 import type { OrviaConfig } from '../../src/infrastructure/config.ts';
 import type { Migration } from '../../src/infrastructure/sqlite/migrator.ts';
@@ -35,24 +36,28 @@ export interface FakeStep {
 export type FakeRole = 'implementation' | 'verification' | 'review' | 'fix';
 
 /**
- * Records every invocation so tests can assert where (and whether) an agent was started.
- * Cycle stages are answered from `script`, per role, in order; the role is read from the
- * prompt's "Role:" line. Other runs use `mode`.
+ * A fake adapter. Records every invocation so tests can assert where (and whether) an agent
+ * was started and what it was allowed. Cycle stages are answered from `script`, per role, in
+ * order; the role is read from the prompt's "Role:" line. Other runs use `mode`.
  */
 export class FakeAgent implements AgentAdapter {
-  readonly name: string;
-  readonly command = process.execPath;
-  readonly invocations: (AgentInvocation & { role: FakeRole | null; access: string })[] = [];
+  readonly id: string;
+  readonly defaultCommand = process.execPath;
+  capabilities: readonly AgentCapability[] = [...AGENT_CAPABILITIES];
+  readonly invocations: (AgentInvocation & {
+    role: FakeRole | null;
+    granted: readonly AgentCapability[];
+  })[] = [];
   mode = 'echo';
   script: Partial<Record<FakeRole, FakeStep[]>> = {};
   readonly #stepDir: string;
 
-  constructor(name = 'fake', stepDir = mkdtempSync(join(tmpdir(), 'orvia-fake-'))) {
-    this.name = name;
+  constructor(id = 'fake', stepDir = mkdtempSync(join(tmpdir(), 'orvia-fake-'))) {
+    this.id = id;
     this.#stepDir = stepDir;
   }
 
-  buildInvocation: AgentAdapter['buildInvocation'] = (request) => {
+  buildInvocation: AgentAdapter['buildInvocation'] = (command, request) => {
     const role = /Role: (?:independent )?(implementation|verification|review|fix)/.exec(
       request.prompt,
     )?.[1] as FakeRole | undefined;
@@ -62,19 +67,21 @@ export class FakeAgent implements AgentAdapter {
         exitCode: 99,
         stdout: `no scripted ${role} step`,
       };
-      const file = join(this.#stepDir, `${this.name}-step-${String(this.invocations.length)}.json`);
+      const file = join(this.#stepDir, `${this.id}-step-${String(this.invocations.length)}.json`);
       writeFileSync(file, JSON.stringify(step));
       args = [FAKE_AGENT, `step:${file}`];
     }
     const invocation = {
-      command: this.command,
+      command,
       args,
       cwd: request.policy.workingDirectory,
       stdin: request.prompt,
     };
-    this.invocations.push({ ...invocation, role: role ?? null, access: request.access });
+    this.invocations.push({ ...invocation, role: role ?? null, granted: request.capabilities });
     return invocation;
   };
+
+  resultStdoutBytes: AgentAdapter['resultStdoutBytes'] = (resultBytes) => resultBytes;
 
   extractResult: AgentAdapter['extractResult'] = (stdout) =>
     stdout.trim() === '' ? null : stdout.trim();
@@ -85,19 +92,38 @@ export interface TestDaemonOptions {
   readonly migrations?: readonly Migration[];
   readonly clock?: Clock;
   readonly agent?: FakeAgent;
-  /** Additional agents, e.g. a separate reviewer. */
+  /** Additional adapters, e.g. a separate reviewer. */
   readonly agents?: readonly FakeAgent[];
+  /**
+   * Agent Profiles; by default one per fake adapter, named like the adapter. Profiles in
+   * `config` are ignored either way, since the bundled adapters are not loaded.
+   */
+  readonly profiles?: Record<
+    string,
+    { adapter: string; command?: string; capabilities?: AgentCapability[] }
+  >;
   readonly listen?: boolean;
   readonly launcher?: ProcessLauncher;
   readonly logger?: Logger;
 }
 
 export function startTestDaemon(env: TestEnv, options: TestDaemonOptions = {}): Promise<Daemon> {
+  const adapters = [options.agent ?? new FakeAgent(), ...(options.agents ?? [])];
+  const base = options.config ?? defaultConfig();
+  const config: OrviaConfig = {
+    ...base,
+    agents: {
+      ...base.agents,
+      profiles:
+        options.profiles ??
+        Object.fromEntries(adapters.map((adapter) => [adapter.id, { adapter: adapter.id }])),
+    },
+  };
   return startDaemon({
     paths: env.paths,
-    config: options.config ?? defaultConfig(),
+    config,
     logger: options.logger ?? silentLogger,
-    agents: [options.agent ?? new FakeAgent(), ...(options.agents ?? [])],
+    adapters,
     listen: options.listen ?? false,
     ...(options.migrations === undefined ? {} : { migrations: options.migrations }),
     ...(options.clock === undefined ? {} : { clock: options.clock }),

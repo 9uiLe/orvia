@@ -68,6 +68,49 @@ describe('orvia CLI', () => {
     assert.equal(checks.find((check) => check.name === 'config')?.status, 'fail');
   });
 
+  test('doctor and list-agent-profiles show each profile as the daemon sees it', async () => {
+    writeConfig(
+      env,
+      JSON.stringify({
+        agents: {
+          profiles: {
+            primary: { adapter: 'codex', command: process.execPath },
+            ghost: { adapter: 'claude', command: '/nonexistent/agent' },
+          },
+        },
+        orchestration: {
+          default_implementation_profile: 'primary',
+          default_review_profile: 'ghost',
+        },
+      }),
+    );
+    await startDaemonProcess();
+    const listed = orvia('list-agent-profiles');
+    assert.equal(listed.status, 0, listed.stderr);
+    const { profiles } = JSON.parse(listed.stdout) as {
+      profiles: { id: string; available: boolean }[];
+    };
+    assert.deepEqual(
+      profiles.map((profile) => [profile.id, profile.available]),
+      [
+        ['primary', true],
+        ['ghost', false],
+      ],
+    );
+
+    const doctor = orvia('doctor', '--json');
+    const checks = new Map(
+      (JSON.parse(doctor.stdout) as { name: string; status: string; detail: string }[]).map(
+        (check) => [check.name, check],
+      ),
+    );
+    assert.equal(checks.get('agent profile primary')?.status, 'ok');
+    assert.equal(checks.get('agent profile ghost')?.status, 'warn');
+    assert.match(checks.get('agent profile ghost')?.detail ?? '', /NOT FOUND/);
+    assert.equal(checks.get('default implementation profile')?.status, 'ok');
+    assert.equal(checks.get('default review profile')?.status, 'warn');
+  });
+
   test('operations map to flags and print JSON', async () => {
     await startDaemonProcess();
     const created = orvia('create-plan', '--title', 'KMP rollout');

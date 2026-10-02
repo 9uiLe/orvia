@@ -79,9 +79,10 @@ try {
           mode: 'implement',
           state: 'IMPLEMENTING',
           maxAutoFixRounds: 3,
-          implementationAgent: 'codex',
-          reviewAgent: 'claude',
+          implementationProfileId: 'primary',
+          reviewProfileId: 'reviewer',
           instructions: 'benchmark',
+          baseCommit: '0000000000000000000000000000000000000000',
           now: new Date().toISOString(),
         }),
       );

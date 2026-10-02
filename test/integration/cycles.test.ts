@@ -15,6 +15,7 @@ import { RESULT_LIMITS } from '../../src/application/agent-results.ts';
 import type { CycleDetails } from '../../src/application/cycles.ts';
 import { runCacheRefs } from '../../src/application/storage.ts';
 import type { OverallStatus } from '../../src/application/status.ts';
+import type { AgentCapability } from '../../src/domain/agent-profile.ts';
 import type { Cycle, CycleState } from '../../src/domain/cycle.ts';
 import type { Finding, Review } from '../../src/domain/review.ts';
 import type { WorkItem } from '../../src/domain/work-item.ts';
@@ -62,6 +63,11 @@ function reviewWith(...findings: Record<string, unknown>[]): FakeStep {
   return { result: { verdict: 'findings', summary: 'problems found', findings } };
 }
 
+const PROFILES = {
+  'primary-profile': { adapter: 'adapter-a' },
+  'review-profile': { adapter: 'adapter-b' },
+};
+
 describe('orchestration cycles', () => {
   let env: TestEnv;
   let agent: FakeAgent;
@@ -71,18 +77,23 @@ describe('orchestration cycles', () => {
   let worktree: string;
   let release: string;
 
-  async function boot(storage: Record<string, number> = {}): Promise<void> {
+  async function boot(
+    storage: Record<string, number> = {},
+    profiles: Record<string, { adapter: string; capabilities?: AgentCapability[] }> = PROFILES,
+    orchestration: Record<string, unknown> = {},
+  ): Promise<void> {
     daemon = await startTestDaemon(env, {
       agent,
       agents: [reviewer],
-      config: config({ storage }),
+      profiles,
+      config: config({ storage, orchestration }),
     });
   }
 
   beforeEach(async () => {
     env = makeTestEnv();
-    agent = new FakeAgent('fake', env.root);
-    reviewer = new FakeAgent('reviewer', env.root);
+    agent = new FakeAgent('adapter-a', env.root);
+    reviewer = new FakeAgent('adapter-b', env.root);
     await boot();
     const repo = createRepository(join(env.root, 'repo'));
     worktree = addWorktree(repo, join(env.root, 'wt'), 'feature');
@@ -103,8 +114,8 @@ describe('orchestration cycles', () => {
       workItemId,
       mode,
       instructions: 'Add a greeting endpoint.',
-      implementationAgent: 'fake',
-      reviewAgent: 'reviewer',
+      implementationProfileId: 'primary-profile',
+      reviewProfileId: 'review-profile',
     });
   }
 
@@ -125,7 +136,7 @@ describe('orchestration cycles', () => {
 
   function invocation(fake: FakeAgent, index: number): FakeAgent['invocations'][number] {
     const found = fake.invocations.at(index);
-    assert.ok(found, `${fake.name} has no invocation ${String(index)}`);
+    assert.ok(found, `${fake.id} has no invocation ${String(index)}`);
     return found;
   }
 
@@ -140,8 +151,18 @@ describe('orchestration cycles', () => {
     assert.notEqual(done.completedAt, null);
     assert.deepEqual(roles(agent), ['implementation', 'verification']);
     assert.deepEqual(roles(reviewer), ['review']);
-    assert.equal(invocation(reviewer, 0).access, 'read-only');
-    assert.ok(agent.invocations.every((invocation) => invocation.access === 'edit'));
+    // Each stage is granted exactly its required capabilities: review cannot edit or run commands.
+    assert.deepEqual(invocation(reviewer, 0).granted, ['workspaceRead', 'structuredResult']);
+    assert.deepEqual(invocation(agent, 0).granted, [
+      'workspaceRead',
+      'workspaceWrite',
+      'structuredResult',
+    ]);
+    assert.deepEqual(invocation(agent, 1).granted, [
+      'workspaceRead',
+      'commandExecution',
+      'structuredResult',
+    ]);
     assert.match(invocation(reviewer, 0).stdin, /Do not rely on what the implementation/);
     assert.match(invocation(reviewer, 0).stdin, /Orvia rules \(highest precedence\)/);
 
@@ -248,7 +269,11 @@ describe('orchestration cycles', () => {
     });
     await rejectsWith(start(), 'CYCLE_ACTIVE');
     await rejectsWith(
-      call(daemon.app, 'start_run', { workItemId: item.id, agent: 'fake', instructions: 'go' }),
+      call(daemon.app, 'start_run', {
+        workItemId: item.id,
+        profileId: 'primary-profile',
+        instructions: 'go',
+      }),
       'CYCLE_ACTIVE',
     );
     await rejectsWith(
@@ -433,8 +458,8 @@ describe('orchestration cycles', () => {
     await until(() => agent.invocations.length === 1);
     await daemon.close();
 
-    agent = new FakeAgent('fake', env.root);
-    reviewer = new FakeAgent('reviewer', env.root);
+    agent = new FakeAgent('adapter-a', env.root);
+    reviewer = new FakeAgent('adapter-b', env.root);
     await boot();
     const blocked = details(cycle.id).cycle;
     assert.equal(blocked.state, 'BLOCKED');
@@ -461,8 +486,8 @@ describe('orchestration cycles', () => {
       UPDATE runs SET status = 'running', exit_code = NULL, finished_at = NULL;`);
     db.close();
 
-    agent = new FakeAgent('fake', env.root);
-    reviewer = new FakeAgent('reviewer', env.root);
+    agent = new FakeAgent('adapter-a', env.root);
+    reviewer = new FakeAgent('adapter-b', env.root);
     await boot();
     const blocked = details(cycle.id).cycle;
     assert.equal(blocked.state, 'BLOCKED');
@@ -549,7 +574,7 @@ describe('orchestration cycles', () => {
     try {
       writeFileSync(release, '');
       const blocked = await settle(cycle.id, 'BLOCKED');
-      assert.equal(blocked.reason, 'START_FAILED');
+      assert.equal(blocked.reason, 'STORAGE_HARD_LIMIT');
       assert.equal(blocked.resumeStage, 'VERIFYING');
       assert.deepEqual(roles(agent), ['implementation']);
       await rejectsWith(

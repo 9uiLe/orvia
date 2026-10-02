@@ -15,6 +15,10 @@ import {
   type Migration,
 } from '../../src/infrastructure/sqlite/migrator.ts';
 import { MIGRATIONS } from '../../src/infrastructure/sqlite/migrations/index.ts';
+import { orchestration } from '../../src/infrastructure/sqlite/migrations/0002_orchestration.ts';
+import { CYCLE_MODES, CYCLE_REASONS, CYCLE_STATES, STAGE_STATES } from '../../src/domain/cycle.ts';
+import { RUN_PURPOSES } from '../../src/domain/records.ts';
+import { FINDING_CATEGORIES, POLICY_REASONS } from '../../src/domain/review.ts';
 import { call, rejectsWith, startTestDaemon } from '../helpers/app.ts';
 import { ManualClock, makeTestEnv, type TestEnv } from '../helpers/env.ts';
 
@@ -206,6 +210,28 @@ describe('database migrations', () => {
       assert.equal(status.openWorkItems[0]?.cycle, null);
     } finally {
       await daemon.close();
+    }
+  });
+
+  test('0002 allows every value the domain defines, and only those', () => {
+    // The migration is frozen SQL; a value added to the domain later needs a new migration.
+    const checks: [string, readonly string[]][] = [
+      ['state', CYCLE_STATES],
+      ['reason', CYCLE_REASONS],
+      ['resume_stage', STAGE_STATES],
+      ['mode', CYCLE_MODES],
+      ['purpose', RUN_PURPOSES],
+      ['category', FINDING_CATEGORIES],
+      ['policy_reason', POLICY_REASONS],
+    ];
+    for (const [column, values] of checks) {
+      const match = new RegExp(`CHECK \\(${column} IN \\(([^)]*)\\)\\)`).exec(orchestration.sql);
+      assert.ok(match?.[1] !== undefined, column);
+      assert.deepEqual(
+        match[1].split(',').map((value) => value.trim().replace(/'/g, '')),
+        [...values],
+        column,
+      );
     }
   });
 

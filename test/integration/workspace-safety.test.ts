@@ -43,7 +43,7 @@ describe('workspace identity safety', () => {
   async function startRun(workItemId: string): Promise<AgentRun> {
     return call<AgentRun>(daemon.app, 'start_run', {
       workItemId,
-      agent: 'fake',
+      profileId: 'fake',
       instructions: 'do it',
     });
   }
@@ -176,7 +176,7 @@ describe('workspace identity safety', () => {
 
   test('mutations require an explicit Work Item id', async () => {
     await rejectsWith(
-      call(daemon.app, 'start_run', { agent: 'fake', instructions: 'x' }),
+      call(daemon.app, 'start_run', { profileId: 'fake', instructions: 'x' }),
       'VALIDATION_FAILED',
     );
     await rejectsWith(call(daemon.app, 'pause_work_item', {}), 'VALIDATION_FAILED');

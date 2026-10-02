@@ -40,7 +40,8 @@ export interface AgentRun {
   readonly workItemId: WorkItemId;
   readonly cycleId: CycleId | null;
   readonly purpose: RunPurpose;
-  readonly agent: string;
+  /** The Agent Profile the run used. */
+  readonly profileId: string;
   readonly status: RunStatus;
   readonly exitCode: number | null;
   readonly outputRef: string | null;

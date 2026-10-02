@@ -39,8 +39,10 @@ import {
   verificationInstructions,
 } from './cycle-prompts.ts';
 import { nowIso, type Dependencies } from './dependencies.ts';
-import type { CyclePatch, TransactionMode } from './ports.ts';
-import { recoveryIncompleteError, type RunSupervisor } from './runs.ts';
+import type { ChangeEvidence, CyclePatch, TransactionMode } from './ports.ts';
+import { recoveryIncompleteError, type RunSupervisor, type StageOutput } from './runs.ts';
+import { assertCapable, requireProfile } from './agent-profiles.ts';
+import { IMPLEMENTATION_PROFILE_STAGES, REVIEW_PROFILE_STAGES } from '../domain/agent-profile.ts';
 import type { StorageService } from './storage.ts';
 import { requireWorkItem } from './work-items.ts';
 
@@ -50,6 +52,17 @@ function resumeStageFor(target: CycleState, from: StageState): StageState | null
   if (target === 'NEEDS_HUMAN') return resumeStageAfterEscalation(from);
   return null;
 }
+
+class ChangesTooLarge extends Error {}
+
+/** Why a stage could not start, as the cycle reports it. */
+const START_FAILURE_REASONS: Partial<Record<string, CycleReason>> = {
+  AGENT_PROFILE_NOT_FOUND: 'AGENT_PROFILE_NOT_FOUND',
+  AGENT_CAPABILITY_MISMATCH: 'AGENT_CAPABILITY_MISMATCH',
+  AGENT_UNAVAILABLE: 'AGENT_UNAVAILABLE',
+  RESULT_STORAGE_EXHAUSTED: 'RESULT_STORAGE_EXHAUSTED',
+  STORAGE_HARD_LIMIT: 'STORAGE_HARD_LIMIT',
+};
 
 const PURPOSE: Record<StageState, ResultPurpose> = {
   IMPLEMENTING: 'implementation',
@@ -80,24 +93,46 @@ export class CycleSupervisor {
     this.#deps = deps;
     this.#runs = runs;
     this.#storage = storage;
-    runs.onFinished = (run, rawResult) => this.#onRunFinished(run, rawResult);
+    runs.onFinished = (run, output) => this.#onRunFinished(run, output);
   }
 
   async start(input: {
     workItemId: WorkItemId;
     mode: CycleMode;
     instructions: string;
-    implementationAgent: string;
-    reviewAgent: string;
+    implementationProfileId?: string | undefined;
+    reviewProfileId?: string | undefined;
+    baseRef?: string | undefined;
   }): Promise<Cycle> {
-    const { store } = this.#deps;
-    for (const agent of [input.implementationAgent, input.reviewAgent]) {
-      if (!this.#deps.agents.has(agent)) {
-        throw new OrviaError('AGENT_UNAVAILABLE', `unknown agent ${agent}`, {
-          agent,
-          known: [...this.#deps.agents.keys()],
-        });
-      }
+    const { store, orchestration } = this.#deps;
+    const implementationProfileId = this.#chooseProfile(
+      input.implementationProfileId,
+      orchestration.defaultImplementationProfile,
+      'implementationProfileId',
+    );
+    const reviewProfileId = this.#chooseProfile(
+      input.reviewProfileId,
+      orchestration.defaultReviewProfile,
+      'reviewProfileId',
+    );
+    // Every stage either profile will run is checked now, before anything starts.
+    await this.#assertProfileUsable(implementationProfileId, IMPLEMENTATION_PROFILE_STAGES);
+    await this.#assertProfileUsable(reviewProfileId, REVIEW_PROFILE_STAGES);
+    const workspace = requireWorkItem(this.#deps, input.workItemId).workspace;
+    if (workspace === null) {
+      throw new OrviaError(
+        'WORKSPACE_NOT_BOUND',
+        `work item ${input.workItemId} has no bound worktree`,
+        { workItemId: input.workItemId },
+      );
+    }
+    const baseRef = input.baseRef ?? 'HEAD';
+    const baseCommit = await this.#deps.git.resolveCommit(workspace.worktreeRoot, baseRef);
+    if (baseCommit === null) {
+      throw new OrviaError('VALIDATION_FAILED', `${baseRef} names no commit in the worktree`, {
+        workItemId: input.workItemId,
+        baseRef,
+      });
     }
     const stage = firstStage(input.mode);
     const cycle = store.transaction(() => {
@@ -133,14 +168,40 @@ export class CycleSupervisor {
         mode: input.mode,
         state: stage,
         maxAutoFixRounds: this.#deps.orchestration.maxAutoFixRounds,
-        implementationAgent: input.implementationAgent,
-        reviewAgent: input.reviewAgent,
+        implementationProfileId,
+        reviewProfileId,
         instructions: input.instructions,
+        baseCommit,
         now: nowIso(this.#deps),
       });
     });
     await this.#launchOrBlock(cycle, stage, true);
     return this.#require(cycle.id);
+  }
+
+  /** The request's profile, else the configured default; never any other profile. */
+  #chooseProfile(requested: string | undefined, configured: string | null, field: string): string {
+    const chosen = requested ?? configured;
+    if (chosen === null) {
+      throw new OrviaError(
+        'VALIDATION_FAILED',
+        `${field} is required: no default is configured in orchestration`,
+        { field },
+      );
+    }
+    return chosen;
+  }
+
+  async #assertProfileUsable(profileId: string, stages: readonly StageState[]): Promise<void> {
+    const profile = requireProfile(this.#deps.profiles, profileId);
+    for (const stage of stages) assertCapable(profile, stage);
+    if ((await this.#deps.launcher.resolveCommand(profile.command)) === null) {
+      throw new OrviaError(
+        'AGENT_UNAVAILABLE',
+        `agent profile ${profile.id}: command not found: ${profile.command}`,
+        { profileId: profile.id, command: profile.command },
+      );
+    }
   }
 
   get(input: { cycleId: CycleId }): CycleDetails {
@@ -276,7 +337,7 @@ export class CycleSupervisor {
     return blocked;
   }
 
-  async #onRunFinished(run: AgentRun, rawResult: string | null): Promise<void> {
+  async #onRunFinished(run: AgentRun, output: StageOutput): Promise<void> {
     if (run.cycleId === null) return;
     const cycle = this.#deps.store.cycles.get(run.cycleId);
     if (cycle?.currentRunId !== run.id || !isStage(cycle.state)) return;
@@ -290,8 +351,17 @@ export class CycleSupervisor {
       this.#stop(cycle, run.id, 'BLOCKED', 'RUN_FAILED');
       return;
     }
+    // Orvia failing to keep the output is a storage problem, not the agent's protocol error.
+    if (output.kind === 'lost') {
+      this.#stop(cycle, run.id, 'BLOCKED', 'RESULT_STORAGE_EXHAUSTED');
+      return;
+    }
+    const rawResult = output.kind === 'result' ? output.text : null;
     let next: NextStep;
     try {
+      if (output.kind === 'oversized') {
+        throw new ResultProtocolError(['the output exceeds the size a valid result can have']);
+      }
       next = this.#applyResult(cycle, run, rawResult);
     } catch (error) {
       if (isOrviaError(error) && error.code === 'STORAGE_HARD_LIMIT') {
@@ -479,14 +549,24 @@ export class CycleSupervisor {
       assertOperationAllowed(await this.#storage.assess(), 'agent_run');
       await this.#launch(cycle, stage);
     } catch (error) {
-      this.#deps.logger.warn('cycle stage could not start', {
-        cycleId: cycle.id,
-        stage,
-        code: isOrviaError(error) ? error.code : 'INTERNAL',
-      });
+      if (error instanceof ChangesTooLarge) {
+        // Reviewing part of a change could pass what was not seen; a human decides instead.
+        this.#commit(cycle.id, 'reserve', (fresh) =>
+          fresh.state === stage
+            ? { state: 'NEEDS_HUMAN', reason: 'CHANGES_TOO_LARGE', resumeStage: stage }
+            : null,
+        );
+        return;
+      }
+      const code = isOrviaError(error) ? error.code : 'INTERNAL';
+      this.#deps.logger.warn('cycle stage could not start', { cycleId: cycle.id, stage, code });
       this.#commit(cycle.id, 'reserve', (fresh) =>
         fresh.state === stage
-          ? { state: 'BLOCKED', reason: 'START_FAILED', resumeStage: stage }
+          ? {
+              state: 'BLOCKED',
+              reason: START_FAILURE_REASONS[code] ?? 'START_FAILED',
+              resumeStage: stage,
+            }
           : null,
       );
       if (rethrow) {
@@ -499,13 +579,14 @@ export class CycleSupervisor {
 
   async #launch(cycle: Cycle, stage: StageState): Promise<void> {
     const purpose = PURPOSE[stage];
+    const instructions = await this.#instructions(cycle, stage);
     await this.#runs.start({
       workItemId: cycle.workItemId,
-      agent: stage === 'REVIEWING' ? cycle.reviewAgent : cycle.implementationAgent,
-      instructions: this.#instructions(cycle, stage),
+      profileId: stage === 'REVIEWING' ? cycle.reviewProfileId : cycle.implementationProfileId,
+      instructions,
       purpose: purpose satisfies RunPurpose,
       cycleId: cycle.id,
-      access: stage === 'REVIEWING' ? 'read-only' : 'edit',
+      stage,
       resultSchema: resultJsonSchema(purpose),
       // A pause or cancel may have landed while the launch was being prepared.
       withinTransaction: (run) => {
@@ -520,14 +601,31 @@ export class CycleSupervisor {
     });
   }
 
-  #instructions(cycle: Cycle, stage: StageState): string {
+  /** The cycle's changes as git reports them, collected by Orvia rather than the reviewer. */
+  async #changeEvidence(cycle: Cycle): Promise<ChangeEvidence> {
+    const workspace = requireWorkItem(this.#deps, cycle.workItemId).workspace;
+    if (workspace === null) {
+      throw new OrviaError('WORKSPACE_NOT_BOUND', `work item ${cycle.workItemId} has no worktree`, {
+        workItemId: cycle.workItemId,
+      });
+    }
+    const evidence = await this.#deps.git.changes(
+      workspace.worktreeRoot,
+      cycle.baseCommit,
+      this.#deps.orchestration.maxReviewDiffBytes,
+    );
+    if (!evidence.complete) throw new ChangesTooLarge();
+    return evidence;
+  }
+
+  async #instructions(cycle: Cycle, stage: StageState): Promise<string> {
     switch (stage) {
       case 'IMPLEMENTING':
         return implementationInstructions(cycle);
       case 'VERIFYING':
         return verificationInstructions();
       case 'REVIEWING':
-        return reviewInstructions(cycle);
+        return reviewInstructions(cycle, await this.#changeEvidence(cycle));
       case 'FIXING':
         return fixInstructions(this.#fixSource(cycle));
     }

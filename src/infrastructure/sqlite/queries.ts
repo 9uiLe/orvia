@@ -8,11 +8,11 @@ const PLAN_COLUMNS = 'id, title, description, status, created_at, updated_at';
 const WORK_ITEM_COLUMNS = `id, plan_id, split_from_id, title, description, status, branch,
   repository_common_dir, repository_common_dir_file_id, worktree_git_dir,
   worktree_git_dir_file_id, worktree_root, pr_url, created_at, updated_at`;
-const RUN_COLUMNS = `id, work_item_id, cycle_id, purpose, agent, status, exit_code, output_ref,
+const RUN_COLUMNS = `id, work_item_id, cycle_id, purpose, profile_id, status, exit_code, output_ref,
   output_bytes, output_truncated, result, started_at, finished_at`;
 const CYCLE_COLUMNS = `id, work_item_id, mode, state, reason, resume_stage, iteration,
-  auto_fix_rounds, max_auto_fix_rounds, implementation_agent, review_agent, instructions,
-  current_run_id, started_at, updated_at, completed_at`;
+  auto_fix_rounds, max_auto_fix_rounds, implementation_profile, review_profile, instructions,
+  base_commit, current_run_id, started_at, updated_at, completed_at`;
 const ACTIVE_CYCLE_STATES = ACTIVE_STATES.map((state) => `'${state}'`).join(', ');
 const REVIEW_COLUMNS = 'id, cycle_id, run_id, iteration, verdict, summary, created_at';
 const FINDING_COLUMNS = `id, review_id, category, title, detail, evidence, suggested_action,
@@ -72,12 +72,12 @@ export const WRITE_STATEMENTS = {
     worktree_git_dir = ?, worktree_git_dir_file_id = ?, worktree_root = ?, updated_at = ?
     WHERE id = ?`,
 
-  insertRun: `INSERT INTO runs (work_item_id, cycle_id, purpose, agent, status, output_ref,
+  insertRun: `INSERT INTO runs (work_item_id, cycle_id, purpose, profile_id, status, output_ref,
     started_at) VALUES (?, ?, ?, ?, 'running', ?, ?)`,
   setRunResult: 'UPDATE runs SET result = ? WHERE id = ?',
   insertCycle: `INSERT INTO cycles (work_item_id, mode, state, max_auto_fix_rounds,
-    implementation_agent, review_agent, instructions, started_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    implementation_profile, review_profile, instructions, base_commit, started_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   updateCycle: `UPDATE cycles SET state = ?, reason = ?, resume_stage = ?, iteration = ?,
     auto_fix_rounds = ?, current_run_id = ?, completed_at = ?, updated_at = ? WHERE id = ?`,
   insertReview: `INSERT INTO reviews (cycle_id, run_id, iteration, verdict, summary, created_at)

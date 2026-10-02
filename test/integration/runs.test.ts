@@ -37,7 +37,7 @@ describe('agent runs', () => {
   function start(): Promise<AgentRun> {
     return call<AgentRun>(daemon.app, 'start_run', {
       workItemId: item.id,
-      agent: 'fake',
+      profileId: 'fake',
       instructions: 'go',
     });
   }
@@ -132,10 +132,10 @@ describe('agent runs', () => {
     assert.match(prompt, /\[reject\] do not touch the public API/);
   });
 
-  test('an unknown agent is refused before anything is recorded', async () => {
+  test('an unknown profile is refused before anything is recorded', async () => {
     await rejectsWith(
-      call(daemon.app, 'start_run', { workItemId: item.id, agent: 'nope', instructions: 'go' }),
-      'AGENT_UNAVAILABLE',
+      call(daemon.app, 'start_run', { workItemId: item.id, profileId: 'nope', instructions: 'go' }),
+      'AGENT_PROFILE_NOT_FOUND',
     );
     const details = await call<{ runs: AgentRun[] }>(daemon.app, 'get_work_item', {
       workItemId: item.id,

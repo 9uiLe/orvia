@@ -34,6 +34,60 @@ function nodeCheck(): Check {
   };
 }
 
+interface ProfileListing {
+  readonly profiles: readonly {
+    id: string;
+    adapter: string;
+    command: string;
+    available: boolean;
+    capabilities: readonly string[];
+    stages: readonly string[];
+  }[];
+  readonly defaults: {
+    implementationProfileId: string | null;
+    reviewProfileId: string | null;
+  };
+}
+
+const IMPLEMENTATION_STAGES = ['IMPLEMENTING', 'VERIFYING', 'FIXING'];
+
+function profileChecks(listing: ProfileListing): Check[] {
+  const checks: Check[] = listing.profiles.map((profile) => ({
+    name: `agent profile ${profile.id}`,
+    status: profile.available ? 'ok' : 'warn',
+    detail:
+      `adapter ${profile.adapter}; command ${profile.command}` +
+      (profile.available ? '' : ' NOT FOUND') +
+      `; capabilities: ${profile.capabilities.join(', ') || 'none'}` +
+      `; stages: ${profile.stages.join(', ') || 'none'}`,
+  }));
+  const defaults: [string, string | null, readonly string[]][] = [
+    [
+      'default implementation profile',
+      listing.defaults.implementationProfileId,
+      IMPLEMENTATION_STAGES,
+    ],
+    ['default review profile', listing.defaults.reviewProfileId, ['REVIEWING']],
+  ];
+  for (const [name, id, stages] of defaults) {
+    if (id === null) {
+      checks.push({ name, status: 'info', detail: 'not set; start_cycle must name a profile' });
+      continue;
+    }
+    const profile = listing.profiles.find((candidate) => candidate.id === id);
+    const missing = stages.filter((stage) => !profile?.stages.includes(stage));
+    checks.push({
+      name,
+      status: profile?.available === true && missing.length === 0 ? 'ok' : 'warn',
+      detail:
+        id +
+        (profile?.available === true ? '' : '; command not found') +
+        (missing.length === 0 ? '' : `; cannot run ${missing.join(', ')}`),
+    });
+  }
+  return checks;
+}
+
 /** Diagnoses the environment without opening the database; database checks go via the daemon. */
 export async function runDoctor(paths: OrviaPaths, client: IpcClient): Promise<Check[]> {
   const checks: Check[] = [{ name: 'orvia', status: 'info', detail: ORVIA_VERSION }, nodeCheck()];
@@ -105,11 +159,13 @@ export async function runDoctor(paths: OrviaPaths, client: IpcClient): Promise<C
       status: storage.assessment.level === 'NORMAL' ? 'ok' : 'warn',
       detail: storage.assessment.level,
     });
+    // The daemon's view: its configuration and PATH are what agent runs use.
+    checks.push(...profileChecks((await client.call('list_agent_profiles', {})) as ProfileListing));
   } catch (error) {
     checks.push({
       name: 'daemon',
       status: 'warn',
-      detail: `${(error as Error).message}; database and storage checks skipped`,
+      detail: `${(error as Error).message}; database, storage, and agent profile checks skipped`,
     });
   }
   return checks;

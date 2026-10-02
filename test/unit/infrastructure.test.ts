@@ -82,12 +82,12 @@ describe('agent adapters', () => {
       writableRoots: ['/wt/a', '/r/.git/worktrees/a', '/r/.git'],
     },
     prompt: 'secret instructions',
-    access: 'edit' as const,
+    capabilities: ['workspaceRead', 'workspaceWrite'] as const,
     result: null,
   };
 
   test('codex runs in the bound worktree with its workspace-write sandbox', () => {
-    const invocation = codexAdapter().buildInvocation(request);
+    const invocation = codexAdapter.buildInvocation('codex', request);
     assert.equal(invocation.cwd, '/wt/a');
     assert.deepEqual(invocation.args, [
       'exec',
@@ -105,7 +105,7 @@ describe('agent adapters', () => {
   });
 
   test('claude runs in the bound worktree; the prompt is passed on stdin, not argv', () => {
-    const invocation = claudeAdapter('/opt/claude').buildInvocation(request);
+    const invocation = claudeAdapter.buildInvocation('/opt/claude', request);
     assert.equal(invocation.command, '/opt/claude');
     assert.equal(invocation.cwd, '/wt/a');
     assert.ok(!invocation.args.includes('secret instructions'));
