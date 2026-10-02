@@ -1,9 +1,5 @@
 import { ACTIVE_STATES } from '../../domain/cycle.ts';
 
-/**
- * Every read the application performs, by name. The schema's indexes are derived from these;
- * test/integration/query-plans.test.ts checks them with EXPLAIN QUERY PLAN.
- */
 const PLAN_COLUMNS = 'id, title, description, status, created_at, updated_at';
 const WORK_ITEM_COLUMNS = `id, plan_id, split_from_id, title, description, status, branch,
   repository_common_dir, repository_common_dir_file_id, worktree_git_dir,
@@ -21,6 +17,10 @@ const DECISION_COLUMNS =
   'id, plan_id, work_item_id, title, body, status, supersedes_id, created_at';
 const NOTE_COLUMNS = 'id, plan_id, work_item_id, kind, body, created_at';
 
+/**
+ * Every read the application performs, by name. The schema's indexes are derived from these;
+ * test/integration/query-plans.test.ts checks them with EXPLAIN QUERY PLAN.
+ */
 export const READ_QUERIES = {
   getCycle: `SELECT ${CYCLE_COLUMNS} FROM cycles WHERE id = ?`,
   getActiveCycle: `SELECT ${CYCLE_COLUMNS} FROM cycles
@@ -30,6 +30,7 @@ export const READ_QUERIES = {
   getReview: `SELECT ${REVIEW_COLUMNS} FROM reviews WHERE id = ?`,
   getLatestReview: `SELECT ${REVIEW_COLUMNS} FROM reviews WHERE cycle_id = ?
     ORDER BY id DESC LIMIT 1`,
+  getFinding: `SELECT ${FINDING_COLUMNS} FROM review_findings WHERE id = ?`,
   listFindingsForReview: `SELECT ${FINDING_COLUMNS} FROM review_findings WHERE review_id = ?
     ORDER BY id`,
 
@@ -50,6 +51,11 @@ export const READ_QUERIES = {
   listRunsForWorkItem: `SELECT ${RUN_COLUMNS} FROM runs WHERE work_item_id = ? ORDER BY id DESC`,
   listRunsForCycle: `SELECT ${RUN_COLUMNS} FROM runs WHERE cycle_id = ? ORDER BY id DESC`,
   listRunningRuns: `SELECT ${RUN_COLUMNS} FROM runs WHERE status = 'running' ORDER BY id`,
+  finishedRunsBeyondKeep: `SELECT id, output_ref FROM (
+      SELECT id, output_ref,
+        row_number() OVER (PARTITION BY work_item_id ORDER BY id DESC) AS position
+      FROM runs WHERE status <> 'running'
+    ) WHERE position > ?`,
 
   getDecision: `SELECT ${DECISION_COLUMNS} FROM decisions WHERE id = ?`,
   listDecisionsForPlan: `SELECT ${DECISION_COLUMNS} FROM decisions WHERE plan_id = ? ORDER BY id`,
@@ -84,18 +90,11 @@ export const WRITE_STATEMENTS = {
     VALUES (?, ?, ?, ?, ?, ?)`,
   insertFinding: `INSERT INTO review_findings (review_id, category, title, detail, evidence,
     suggested_action, policy_action, policy_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-  getFinding: `SELECT ${FINDING_COLUMNS} FROM review_findings WHERE id = ?`,
   finishRun: `UPDATE runs SET status = ?, exit_code = ?, output_bytes = ?, output_truncated = ?,
     finished_at = ? WHERE id = ? AND status = 'running'`,
   interruptRun: `UPDATE runs SET status = 'interrupted', finished_at = ?
     WHERE id = ? AND status = 'running'`,
-  finishedRunsBeyondKeep: `SELECT id, output_ref FROM (
-      SELECT id, output_ref,
-        row_number() OVER (PARTITION BY work_item_id ORDER BY id DESC) AS position
-      FROM runs WHERE status <> 'running'
-    ) WHERE position > ?`,
   deleteRun: 'DELETE FROM runs WHERE id = ?',
-  listOutputRefs: 'SELECT output_ref FROM runs WHERE output_ref IS NOT NULL',
 
   insertDecision: `INSERT INTO decisions
     (plan_id, work_item_id, title, body, status, supersedes_id, created_at)

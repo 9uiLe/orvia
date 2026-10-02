@@ -71,12 +71,31 @@ export interface DatabaseCapacity {
   readonly writeMaxPages: number;
 }
 
+/** Worst-case bytes one page adds to the budget: the page itself plus its journal record. */
+export function journalPerPageBytes(pageSize: number): number {
+  return 2 * pageSize + JOURNAL_RECORD_OVERHEAD_BYTES;
+}
+
+/** Budget needed to hold `pages` pages plus the control reserve, with a full journal and the fixed files. */
+export function requiredBytesForPages(input: {
+  readonly pages: number;
+  readonly reservePages: number;
+  readonly pageSize: number;
+  readonly fixedBytes: number;
+}): number {
+  return (
+    (input.pages + input.reservePages) * journalPerPageBytes(input.pageSize) +
+    JOURNAL_HEADER_BYTES +
+    input.fixedBytes
+  );
+}
+
 /**
  * Page caps that keep main file + rollback journal + everything else within the budget.
  *
  * A transaction's journal holds each page that existed when it began at most once, so with the
  * main file capped at `maxPages` the journal is at most `maxPages` records plus one header.
- * `fixedBytes` is every other file in the budget (backups, leftover WAL or SHM).
+ * `fixedBytes` is every other file in the budget (backups, WAL, SHM, and any journal left on disk).
  *
  * Control and maintenance transactions (pause, recording a run's result, cleanup) may use the
  * pages between `writeMaxPages` and `maxPages`. They change one row per b-tree, and one row
@@ -90,7 +109,7 @@ export function databaseCapacity(input: {
   readonly pageSize: number;
   readonly btreeCount: number;
 }): DatabaseCapacity {
-  const perPage = 2 * input.pageSize + JOURNAL_RECORD_OVERHEAD_BYTES;
+  const perPage = journalPerPageBytes(input.pageSize);
   const available = input.budgetBytes - input.fixedBytes - JOURNAL_HEADER_BYTES;
   const maxPages = Math.max(0, Math.floor(available / perPage));
   const depth = Math.ceil(Math.log2(Math.max(maxPages, 2)));

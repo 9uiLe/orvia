@@ -110,7 +110,6 @@ export interface RunRepository {
   /** Finished runs beyond the newest `keep` per Work Item. */
   listFinishedBeyond(keep: number): { runId: RunId; outputRef: string | null }[];
   delete(id: RunId): void;
-  listOutputRefs(): string[];
 }
 
 export interface CyclePatch {

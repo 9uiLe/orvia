@@ -230,7 +230,7 @@ function countsFrom<S extends string>(rows: Row[], statuses: readonly S[]): Reco
 export interface StoreBudget {
   /** `storage.database_max_mb` in bytes. */
   readonly budgetBytes: number;
-  /** Current size of every budgeted file other than the main database and its journal. */
+  /** Current size of every budgeted file other than the main database: WAL, SHM, any leftover journal, and backups. */
   readonly fixedBytes: () => number;
 }
 
@@ -413,14 +413,13 @@ export class SqliteStore implements Store {
       },
       markInterrupted: (id, now) => run(w.interruptRun, now, parseId('run', id)).changes === 1,
       listFinishedBeyond: (keep) =>
-        all(w.finishedRunsBeyondKeep, keep).map((row) => ({
+        all(q.finishedRunsBeyondKeep, keep).map((row) => ({
           runId: formatId('run', num(row, 'id')),
           outputRef: strOrNull(row, 'output_ref'),
         })),
       delete: (id) => {
         run(w.deleteRun, parseId('run', id));
       },
-      listOutputRefs: () => all(w.listOutputRefs).map((row) => str(row, 'output_ref')),
     };
 
     const getDecision = (id: DecisionId): Decision | null => {
@@ -559,7 +558,7 @@ export class SqliteStore implements Store {
           input.policyAction,
           input.policyReason,
         );
-        const row = one(w.getFinding, Number(result.lastInsertRowid));
+        const row = one(q.getFinding, Number(result.lastInsertRowid));
         if (row === undefined) throw new OrviaError('INTERNAL', 'inserted finding not found');
         return rowToFinding(row);
       },

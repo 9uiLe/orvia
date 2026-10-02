@@ -16,8 +16,11 @@ import { GitCli } from '../../infrastructure/git/git-cli.ts';
 import { GitWorkspaceInspector } from '../../infrastructure/git/workspace-inspector.ts';
 import { createLogger } from '../../infrastructure/logger.ts';
 import { ensureDir, ensurePrivateDir, type OrviaPaths } from '../../infrastructure/paths.ts';
-import { SqliteDatabaseFiles } from '../../infrastructure/sqlite/database-files.ts';
-import { measureDatabaseFiles } from '../../infrastructure/sqlite/database-files.ts';
+import {
+  measureDatabaseFiles,
+  otherBudgetedBytes,
+  SqliteDatabaseFiles,
+} from '../../infrastructure/sqlite/database-files.ts';
 import { openDatabase } from '../../infrastructure/sqlite/database.ts';
 import type { Migration, MigrationReport } from '../../infrastructure/sqlite/migrator.ts';
 import { MIGRATIONS } from '../../infrastructure/sqlite/migrations/index.ts';
@@ -67,10 +70,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   });
   const store = new SqliteStore(opened.db, options.migrations ?? MIGRATIONS, {
     budgetBytes: databaseBudgetBytes(config),
-    fixedBytes: () => {
-      const usage = measureDatabaseFiles(paths.databaseFile, paths.backupDir);
-      return usage.walBytes + usage.shmBytes + usage.journalBytes + usage.backupBytes;
-    },
+    fixedBytes: () => otherBudgetedBytes(measureDatabaseFiles(paths.databaseFile, paths.backupDir)),
   });
   let server: Server | null = null;
   try {
