@@ -16,21 +16,24 @@ npm ci
 npm test
 ```
 
-Without Nix you need Node.js >= 24.15 and git. CI uses the Nix shell, so if results differ, the Nix shell is the reference.
+Without Nix you need git and the Node.js version in the `engines` field of `package.json` (>= 24.15). CI uses the Nix shell, so if results differ, the Nix shell is the reference.
 
 ## npm scripts
 
-| Script                     | Purpose                                         |
-| -------------------------- | ----------------------------------------------- |
-| `npm run typecheck`        | Type-check the project                          |
-| `npm run lint`             | ESLint and Prettier check                       |
-| `npm run format`           | Format files with Prettier                      |
-| `npm test`                 | Run all tests                                   |
-| `npm run test:unit`        | Run unit tests (`test/unit`)                    |
-| `npm run test:integration` | Run integration tests (`test/integration`)      |
-| `npm run build`            | Build the project                               |
-| `npm run bench`            | Run benchmarks                                  |
-| `npm run check`            | Typecheck, lint, test, and build in one command |
+| Script                     | Purpose                                                           |
+| -------------------------- | ----------------------------------------------------------------- |
+| `npm run typecheck`        | Type-check the project                                            |
+| `npm run lint`             | ESLint and Prettier check                                         |
+| `npm run format`           | Format files with Prettier                                        |
+| `npm test`                 | Run all tests                                                     |
+| `npm run test:unit`        | Run unit tests (`test/unit`)                                      |
+| `npm run test:integration` | Run integration tests (`test/integration`)                        |
+| `npm run build`            | Build the project                                                 |
+| `npm run bench`            | Run the status-query benchmark                                    |
+| `npm run bench:storage`    | Run the storage benchmark (operation mix, file sizes)             |
+| `npm run deps:check`       | Check dependencies against the allowed list                       |
+| `npm run orvia`            | Run the CLI from source (`src/interface/cli/main.ts`)             |
+| `npm run check`            | Typecheck, lint, dependency check, test, and build in one command |
 
 Run `npm run check` before opening a pull request.
 

@@ -34,8 +34,13 @@ CLI ─────────────────────────�
   that of the local user account.
 - Tools are generated from the operation registry (the same one the CLI uses), so MCP and CLI
   cannot drift. Inputs are validated with zod schemas and published as JSON Schema.
-- Tool annotations come from the operation class: read operations have `readOnlyHint: true`;
-  `start_run` and maintenance have `destructiveHint: true`; `start_run` has `openWorldHint: true`.
+- Tool annotations come from the operation class (`OperationClass` in
+  `src/application/operations.ts`), through the `ANNOTATIONS` table in
+  `src/interface/mcp/mcp-server.ts`, which is the source of truth. `read` has
+  `readOnlyHint: true` and `idempotentHint: true`. `control` and `write` have no hint set to
+  `true`. `maintenance` has `destructiveHint: true`. `agent_run` (`start_run`, `start_cycle`,
+  `resume_cycle`) has `destructiveHint: true` and `openWorldHint: true`. Every other hint is
+  `false`.
 - Identity is always explicit (`P-n`, `W-n`); nothing depends on chat sessions or MCP sessions.
 - Errors are tool results with `isError: true` and `{ error: { code, message, details } }`.
 

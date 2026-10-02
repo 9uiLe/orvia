@@ -31,6 +31,11 @@ session). Its descendants stay in that group unless they deliberately leave it.
    only processes stuck in the kernel (uninterruptible sleep) remain after it.
 5. If the group is still not empty: `AGENT_TERMINATION_FAILED`.
 
+`agents.kill_confirmation_ms` has a second use. After an agent exits and its group is stopped, the
+launcher waits up to that long for the agent's stdout and stderr pipes to close, because a
+descendant outside the group can still hold them open. Then it destroys the pipes and reports the
+exit, so output from such a descendant after that point is dropped.
+
 Both defaults were chosen by the maintainer and can be changed in `config.json`.
 
 The group is empty when `kill(-pgid, 0)` fails with `ESRCH`. It is polled because no event

@@ -373,7 +373,7 @@ npm test
 
 Inside the shell: `npm run typecheck`, `npm run lint`, `npm test` (`test:unit`,
 `test:integration`), `npm run build`, `npm run bench`, or `npm run check` for all of them.
-Without Nix you need Node.js ≥ 24.15 and git; if results differ, the Nix shell is the
+Without Nix you need git and the Node.js version in the `engines` field of `package.json` (≥ 24.15); if results differ, the Nix shell is the
 reference. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Installation
@@ -385,7 +385,7 @@ npm ci && npm run build
 npm link            # puts `orvia` on your PATH (or run node dist/interface/cli/main.js)
 ```
 
-Requires Node.js ≥ 24.15 and git at runtime. To use a local build without `npm link`:
+Requires git and the Node.js version in the `engines` field of `package.json` (≥ 24.15) at runtime. To use a local build without `npm link`:
 
 ```sh
 chmod +x dist/interface/cli/main.js
@@ -553,31 +553,33 @@ Details: [ADR 0004](docs/adr/0004-storage-policy.md).
 }
 ```
 
-| Key                                            | Meaning                                                                       |
-| ---------------------------------------------- | ----------------------------------------------------------------------------- |
-| `log_level`                                    | `error`, `warn`, `info`, `debug`, or `trace`                                  |
-| `storage.database_max_mb`                      | hard budget for state.db + journal + leftover WAL/SHM + migration backups     |
-| `storage.cache_max_mb`                         | agent output cache                                                            |
-| `storage.retention_days`                       | cache entries and migration backups                                           |
-| `storage.max_completed_runs_per_work_item`     | finished run records kept per Work Item                                       |
-| `storage.pressure_percent`                     | cleanup starts                                                                |
-| `storage.warning_percent`                      | status reports `WARNING`                                                      |
-| `agents.profiles.<id>.adapter`                 | the adapter the profile uses (`codex` or `claude` today)                      |
-| `agents.profiles.<id>.command`                 | executable name on `PATH`, or a path; defaults to the adapter's own           |
-| `agents.profiles.<id>.capabilities`            | optional list that narrows the adapter's capabilities                         |
-| `agents.termination_grace_ms`                  | time between `SIGTERM` and `SIGKILL` when stopping an agent                   |
-| `agents.kill_confirmation_ms`                  | how long to wait for the process group to disappear after `SIGKILL`           |
-| `orchestration.max_review_fix_cycles`          | automatic fix rounds before a cycle stops at `NEEDS_HUMAN / LOOP_LIMIT`       |
-| `orchestration.default_implementation_profile` | profile `start_cycle` uses when the request names none (no default)           |
-| `orchestration.default_review_profile`         | the same for reviews (no default)                                             |
-| `orchestration.max_review_diff_kb`             | largest change Orvia puts into a review prompt; larger stops at `NEEDS_HUMAN` |
+| Key                                            | Meaning                                                                                                                     |
+| ---------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `log_level`                                    | `error`, `warn`, `info`, `debug`, or `trace`                                                                                |
+| `storage.database_max_mb`                      | hard budget for state.db + journal + leftover WAL/SHM + migration backups                                                   |
+| `storage.cache_max_mb`                         | agent output cache                                                                                                          |
+| `storage.retention_days`                       | cache entries and migration backups                                                                                         |
+| `storage.max_completed_runs_per_work_item`     | finished run records kept per Work Item                                                                                     |
+| `storage.pressure_percent`                     | cleanup starts                                                                                                              |
+| `storage.warning_percent`                      | status reports `WARNING`                                                                                                    |
+| `agents.profiles.<id>.adapter`                 | the adapter the profile uses (`codex` or `claude` today)                                                                    |
+| `agents.profiles.<id>.command`                 | executable name on `PATH`, or a path; defaults to the adapter's own                                                         |
+| `agents.profiles.<id>.capabilities`            | optional list that narrows the adapter's capabilities                                                                       |
+| `agents.termination_grace_ms`                  | time between `SIGTERM` and `SIGKILL` when stopping an agent                                                                 |
+| `agents.kill_confirmation_ms`                  | how long to wait after `SIGKILL` for the process group to disappear, and after an agent exits for its output pipes to close |
+| `orchestration.max_review_fix_cycles`          | automatic fix rounds before a cycle stops at `NEEDS_HUMAN / LOOP_LIMIT`                                                     |
+| `orchestration.default_implementation_profile` | profile `start_cycle` uses when the request names none (no default)                                                         |
+| `orchestration.default_review_profile`         | the same for reviews (no default)                                                                                           |
+| `orchestration.max_review_diff_kb`             | largest change Orvia puts into a review prompt; larger stops at `NEEDS_HUMAN`                                               |
 
 JSON instead of TOML keeps the runtime free of a parser dependency
 ([ADR 0007](docs/adr/0007-external-dependencies.md)).
 The size defaults and the fix-round limit come from the project brief; the thresholds,
 termination timeouts, and the review diff limit were set by the maintainer.
 They are starting points to revisit with real usage data, not measured optima. Invalid values
-stop the daemon with `CONFIG_INVALID`.
+stop the daemon with `CONFIG_INVALID`. A `storage.database_max_mb` that passes validation but is
+too small for the schema's control reserve is not a config error: the migration that would exceed
+it is rolled back and the daemon refuses to start with `MIGRATION_STORAGE_REQUIRED`.
 
 Pressure levels: `NORMAL` → `PRESSURE` (cleanup starts) → `WARNING` → `HARD_LIMIT`. For the
 database they compare the data size with its write capacity (`get_storage_status` reports
@@ -644,13 +646,13 @@ Report vulnerabilities privately: [SECURITY.md](SECURITY.md).
 
 ## Performance
 
-`npm run bench` measures the status queries an MCP client or the CLI triggers. On an Apple Silicon laptop
-(Node 24.21, 100 Plans × 5 Work Items), p95 latency was 0.02–1.0 ms in-process and 0.08–1.5 ms
-over the daemon socket with the earlier WAL configuration. `npm run bench:storage` measures the
-full operation mix and file sizes; with the rollback journal, writes are 0.65–0.85 ms and
-`get_status` 1.39–1.43 ms at p95 ([results](docs/benchmarks/2026-10-02-journal-mode.md)). With an
-active cycle on every Work Item (the most `get_status` can show), `npm run bench` measured
-`get_status` at 1.81–1.94 ms p95 in-process and 2.52–2.72 ms over the socket, in three runs.
+`npm run bench:storage` measures the full operation mix and file sizes. On an Apple Silicon
+laptop (Node 24.21, 100 Plans × 5 Work Items) with the rollback journal, writes are 0.65–0.85 ms
+and `get_status` 1.39–1.43 ms at p95 ([results](docs/benchmarks/2026-10-02-journal-mode.md), which
+also compares the WAL configuration). `npm run bench` measures the status queries an MCP client or
+the CLI triggers. With an active cycle on every Work Item (the most `get_status` can show), it
+measured `get_status` at 1.81–1.94 ms p95 in-process and 2.52–2.72 ms over the socket, in three
+runs.
 The brief's candidate budget is p95 < 50 ms. CI does not enforce it
 because shared runners vary too much for a fixed threshold to mean anything.
 

@@ -9,7 +9,7 @@ export interface GitResult {
 }
 
 /**
- * The only place that spawns git. Orvia uses read-only plumbing commands; nothing in this
+ * The only place that spawns git. Orvia runs only read-only git commands (plumbing, plus status and diff for review evidence); nothing in this
  * code base creates, moves, or deletes branches, worktrees, commits, or repositories.
  */
 export class GitCli {
