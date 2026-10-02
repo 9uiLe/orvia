@@ -7,6 +7,7 @@
 //                         process appends its pid to <file> and keeps running
 //   stubborn-tree:<file>  like tree, but every process ignores SIGTERM
 //   leave-child:<file>    start a child that keeps running, then exit 0
+//   step:<file>           follow a scripted step (see FakeStep in test/helpers/app.ts)
 import { spawn } from 'node:child_process';
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -49,6 +50,20 @@ if (kind === 'echo') {
   const grandchild = generation(file, stubborn, null);
   spawn(process.execPath, ['-e', generation(file, stubborn, grandchild)], { stdio: 'inherit' });
   setInterval(() => undefined, 1000);
+} else if (kind === 'step') {
+  const step = JSON.parse(readFileSync(file, 'utf8')) as {
+    result?: unknown;
+    stdout?: string;
+    exitCode?: number;
+    waitFor?: string;
+    holdFor?: string;
+  };
+  if (step.waitFor !== undefined) while (!existsSync(step.waitFor)) await sleep(10);
+  process.stdout.write(
+    step.stdout ?? (step.result === undefined ? '' : JSON.stringify(step.result)),
+  );
+  if (step.holdFor !== undefined) while (!existsSync(step.holdFor)) await sleep(10);
+  process.exitCode = step.exitCode ?? 0;
 } else if (kind === 'leave-child') {
   // unref() lets this process exit while the child keeps running.
   spawn(process.execPath, ['-e', generation(file, false, null)], { stdio: 'inherit' }).unref();

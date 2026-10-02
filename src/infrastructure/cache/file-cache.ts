@@ -1,7 +1,12 @@
 import { createWriteStream, mkdirSync, type WriteStream } from 'node:fs';
 import { lstat, open, readdir, rm } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import type { CleanupFailure, EphemeralStore, OutputWriter } from '../../application/ports.ts';
+import type {
+  CleanupFailure,
+  EphemeralStore,
+  OutputWriter,
+  WriterOptions,
+} from '../../application/ports.ts';
 import { OrviaError } from '../../domain/errors.ts';
 
 interface Entry {
@@ -11,32 +16,80 @@ interface Entry {
   readonly mtimeMs: number;
 }
 
+interface ActiveWriter {
+  /** Bytes counted against the budget: what was written, or the reservation if larger. */
+  counted: number;
+}
+
 /**
  * Ephemeral storage under the cache directory. Writers share one byte budget derived from the
  * configured cache limit, so concurrent agent runs cannot push the cache past it together.
+ *
+ * Usage is the closed files measured on disk plus what open writers have counted. An open
+ * writer's file is never measured: its size on disk lags behind the bytes it accepted, and
+ * measuring it would let a later write reuse budget those bytes already took.
  */
 export class FileCache implements EphemeralStore {
   readonly #root: string;
   readonly #maxBytes: number;
-  #remainingBytes: number;
+  /** Closed files as last measured; null until the first measurement. */
+  #closedBytes: number | null = null;
+  readonly #writers = new Map<string, ActiveWriter>();
+  /** For each measurement in progress: writers that closed meanwhile, with their final size. */
+  readonly #measurements = new Set<Map<string, number>>();
 
   constructor(root: string, maxBytes: number) {
     this.#root = resolve(root);
     this.#maxBytes = maxBytes;
-    // Unknown until measureBytes(); dropping output is safer than overrunning the cap.
-    this.#remainingBytes = 0;
   }
 
-  async measureBytes(): Promise<number> {
-    const total = (await this.#entries()).reduce((sum, entry) => sum + entry.size, 0);
-    this.#remainingBytes = Math.max(0, this.#maxBytes - total);
+  #openBytes(): number {
+    let total = 0;
+    for (const writer of this.#writers.values()) total += writer.counted;
     return total;
   }
 
-  createWriter(ref: string): OutputWriter {
+  /** Unknown until the first measurement; dropping output is safer than overrunning the cap. */
+  #available(): number {
+    if (this.#closedBytes === null) return 0;
+    return Math.max(0, this.#maxBytes - this.#closedBytes - this.#openBytes());
+  }
+
+  async measureBytes(): Promise<number> {
+    const closedMeanwhile = new Map<string, number>();
+    this.#measurements.add(closedMeanwhile);
+    let entries: Entry[];
+    try {
+      entries = await this.#entries();
+    } finally {
+      this.#measurements.delete(closedMeanwhile);
+    }
+    let closed = 0;
+    for (const entry of entries) {
+      if (this.#writers.has(entry.path) || closedMeanwhile.has(entry.path)) continue;
+      closed += entry.size;
+    }
+    // A writer that closed during the walk may have been measured before its last bytes were
+    // flushed, or skipped as open; its final size is known exactly.
+    for (const bytes of closedMeanwhile.values()) closed += bytes;
+    this.#closedBytes = closed;
+    return closed + this.#openBytes();
+  }
+
+  createWriter(ref: string, options: WriterOptions = {}): OutputWriter {
     const path = this.#resolve(ref);
+    const reserved = options.reserveBytes ?? 0;
+    if (reserved > this.#available()) {
+      throw new OrviaError(
+        'RESULT_STORAGE_EXHAUSTED',
+        `the cache cannot set aside ${reserved} bytes for ${ref}`,
+        { ref, reserveBytes: reserved, availableBytes: this.#available() },
+      );
+    }
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     const stream: WriteStream = createWriteStream(path, { flags: 'wx', mode: 0o600 });
+    const active: ActiveWriter = { counted: reserved };
+    this.#writers.set(path, active);
     let bytes = 0;
     let truncated = false;
     let streamError: Error | null = null;
@@ -46,17 +99,22 @@ export class FileCache implements EphemeralStore {
     return {
       write: (chunk) => {
         if (truncated || streamError !== null) return;
-        const allowed = Math.min(chunk.byteLength, this.#remainingBytes);
+        // A reserved writer stays within its reservation; others take from the shared budget.
+        const room = reserved > 0 ? reserved - bytes : this.#available() + active.counted - bytes;
+        const allowed = Math.max(0, Math.min(chunk.byteLength, room));
         if (allowed < chunk.byteLength) truncated = true;
         if (allowed === 0) return;
-        this.#remainingBytes -= allowed;
         bytes += allowed;
+        active.counted = Math.max(reserved, bytes);
         stream.write(chunk.subarray(0, allowed));
       },
       close: () =>
         new Promise((resolveClose) => {
           stream.end(() => {
-            resolveClose({ bytes, truncated: truncated || streamError !== null });
+            this.#writers.delete(path);
+            if (this.#closedBytes !== null) this.#closedBytes += bytes;
+            for (const closedMeanwhile of this.#measurements) closedMeanwhile.set(path, bytes);
+            resolveClose({ bytes, truncated, failed: streamError !== null });
           });
         }),
     };
@@ -81,6 +139,27 @@ export class FileCache implements EphemeralStore {
     }
   }
 
+  async readHead(ref: string, maxBytes: number): Promise<string | null> {
+    let handle;
+    try {
+      handle = await open(this.#resolve(ref), 'r');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
+    }
+    try {
+      const buffer = Buffer.alloc(maxBytes);
+      const { bytesRead } = await handle.read(buffer, 0, maxBytes, 0);
+      return buffer.subarray(0, bytesRead).toString('utf8');
+    } finally {
+      await handle.close();
+    }
+  }
+
+  absolutePath(ref: string): string {
+    return this.#resolve(ref);
+  }
+
   async remove(refs: readonly string[]): Promise<CleanupFailure[]> {
     const failures: CleanupFailure[] = [];
     for (const ref of refs) {
@@ -90,6 +169,7 @@ export class FileCache implements EphemeralStore {
         failures.push({ target: `cache:${ref}`, message: (error as Error).message });
       }
     }
+    await this.measureBytes();
     return failures;
   }
 
@@ -106,7 +186,7 @@ export class FileCache implements EphemeralStore {
     const expiry = options.expiresBefore.getTime();
 
     for (const entry of entries) {
-      if (options.protectedRefs.has(entry.ref)) continue;
+      if (options.protectedRefs.has(entry.ref) || this.#writers.has(entry.path)) continue;
       const expired = entry.mtimeMs < expiry;
       if (!expired && total <= options.targetBytes) continue;
       try {
@@ -118,7 +198,7 @@ export class FileCache implements EphemeralStore {
         failures.push({ target: `cache:${entry.ref}`, message: (error as Error).message });
       }
     }
-    this.#remainingBytes = Math.max(0, this.#maxBytes - total);
+    await this.measureBytes();
     return { removed, freedBytes, failures };
   }
 
@@ -143,7 +223,14 @@ export class FileCache implements EphemeralStore {
       }
       for (const name of names) {
         const path = join(dir, name);
-        const info = await lstat(path);
+        let info;
+        try {
+          info = await lstat(path);
+        } catch (error) {
+          // A concurrent cleanup may remove an entry between readdir and lstat.
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+          throw error;
+        }
         if (info.isDirectory()) await walk(path);
         else
           entries.push({

@@ -67,7 +67,7 @@ describe('agent process lifecycle', { skip: !posix && 'POSIX process groups only
   function runAgent(d: Daemon): Promise<AgentRun> {
     return call<AgentRun>(d.app, 'start_run', {
       workItemId: item.id,
-      agent: 'fake',
+      profileId: 'fake',
       instructions: 'go',
     });
   }

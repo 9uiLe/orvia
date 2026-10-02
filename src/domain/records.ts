@@ -1,4 +1,4 @@
-import type { DecisionId, NoteId, PlanId, RunId, WorkItemId } from './ids.ts';
+import type { CycleId, DecisionId, NoteId, PlanId, RunId, WorkItemId } from './ids.ts';
 
 export const DECISION_STATUSES = ['accepted', 'superseded'] as const;
 export type DecisionStatus = (typeof DECISION_STATUSES)[number];
@@ -31,15 +31,24 @@ export interface Note {
 export const RUN_STATUSES = ['running', 'succeeded', 'failed', 'cancelled', 'interrupted'] as const;
 export type RunStatus = (typeof RUN_STATUSES)[number];
 
+/** `manual` runs come from start_run; the others are stages of an orchestration cycle. */
+export const RUN_PURPOSES = ['manual', 'implementation', 'verification', 'review', 'fix'] as const;
+export type RunPurpose = (typeof RUN_PURPOSES)[number];
+
 export interface AgentRun {
   readonly id: RunId;
   readonly workItemId: WorkItemId;
-  readonly agent: string;
+  readonly cycleId: CycleId | null;
+  readonly purpose: RunPurpose;
+  /** The Agent Profile the run used. */
+  readonly profileId: string;
   readonly status: RunStatus;
   readonly exitCode: number | null;
   readonly outputRef: string | null;
   readonly outputBytes: number;
   readonly outputTruncated: boolean;
+  /** The validated structured result of a cycle stage, if any. */
+  readonly result: string | null;
   readonly startedAt: string;
   readonly finishedAt: string | null;
 }

@@ -6,6 +6,9 @@ const PREFIXES = {
   run: 'R',
   decision: 'D',
   note: 'N',
+  cycle: 'C',
+  review: 'Rv',
+  finding: 'F',
 } as const;
 
 export type EntityKind = keyof typeof PREFIXES;
@@ -15,6 +18,9 @@ export type WorkItemId = `W-${number}`;
 export type RunId = `R-${number}`;
 export type DecisionId = `D-${number}`;
 export type NoteId = `N-${number}`;
+export type CycleId = `C-${number}`;
+export type ReviewId = `Rv-${number}`;
+export type FindingId = `F-${number}`;
 
 export interface IdByKind {
   plan: PlanId;
@@ -22,6 +28,9 @@ export interface IdByKind {
   run: RunId;
   decision: DecisionId;
   note: NoteId;
+  cycle: CycleId;
+  review: ReviewId;
+  finding: FindingId;
 }
 
 export function formatId<K extends EntityKind>(kind: K, rowId: number): IdByKind[K] {
@@ -41,7 +50,7 @@ export function parseId(kind: EntityKind, id: string): number {
       id,
     });
   }
-  const rowId = Number(id.slice(2));
+  const rowId = Number(id.slice(PREFIXES[kind].length + 1));
   if (!Number.isSafeInteger(rowId)) {
     throw new OrviaError('VALIDATION_FAILED', `id out of range: ${id}`, { id });
   }

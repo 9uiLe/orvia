@@ -1,6 +1,16 @@
-import type { DecisionId, PlanId, RunId, WorkItemId } from '../domain/ids.ts';
+import type { AgentCapability } from '../domain/agent-profile.ts';
+import type { CycleId, DecisionId, PlanId, ReviewId, RunId, WorkItemId } from '../domain/ids.ts';
 import type { Plan, PlanStatus } from '../domain/plan.ts';
-import type { AgentRun, Decision, Note, NoteKind, RunStatus } from '../domain/records.ts';
+import type {
+  AgentRun,
+  Decision,
+  Note,
+  NoteKind,
+  RunPurpose,
+  RunStatus,
+} from '../domain/records.ts';
+import type { Cycle, CycleMode, CycleReason, CycleState, StageState } from '../domain/cycle.ts';
+import type { Finding, Review, ReviewVerdict } from '../domain/review.ts';
 import type { FilesystemPolicy } from '../domain/sandbox.ts';
 import type { DatabaseCapacity, DatabaseShape, DatabaseUsage } from '../domain/storage.ts';
 import type { WorkItem, WorkItemStatus } from '../domain/work-item.ts';
@@ -25,6 +35,8 @@ export interface Store {
   readonly runs: RunRepository;
   readonly decisions: DecisionRepository;
   readonly notes: NoteRepository;
+  readonly cycles: CycleRepository;
+  readonly reviews: ReviewRepository;
   readonly maintenance: DatabaseMaintenance;
 }
 
@@ -69,10 +81,14 @@ export interface RunRepository {
   /** Throws RUN_IN_PROGRESS when the Work Item already has a running run. */
   insert(input: {
     workItemId: WorkItemId;
-    agent: string;
+    profileId: string;
     outputRef: string;
+    purpose: RunPurpose;
+    cycleId: CycleId | null;
     now: string;
   }): AgentRun;
+  /** Stores a validated, size-checked structured result. */
+  setResult(id: RunId, resultJson: string): void;
   finish(
     id: RunId,
     result: {
@@ -86,6 +102,8 @@ export interface RunRepository {
   get(id: RunId): AgentRun | null;
   current(workItemId: WorkItemId): AgentRun | null;
   listForWorkItem(workItemId: WorkItemId): AgentRun[];
+  /** Newest first. */
+  listForCycle(cycleId: CycleId): AgentRun[];
   listRunning(): AgentRun[];
   /** Returns false if the run was no longer running. */
   markInterrupted(id: RunId, now: string): boolean;
@@ -93,6 +111,50 @@ export interface RunRepository {
   listFinishedBeyond(keep: number): { runId: RunId; outputRef: string | null }[];
   delete(id: RunId): void;
   listOutputRefs(): string[];
+}
+
+export interface CyclePatch {
+  state?: CycleState;
+  reason?: CycleReason | null;
+  resumeStage?: StageState | null;
+  iteration?: number;
+  autoFixRounds?: number;
+  currentRunId?: RunId | null;
+  completedAt?: string | null;
+}
+
+export interface CycleRepository {
+  /** Throws CYCLE_ACTIVE when the Work Item already has an active cycle. */
+  insert(input: {
+    workItemId: WorkItemId;
+    mode: CycleMode;
+    state: StageState;
+    maxAutoFixRounds: number;
+    implementationProfileId: string;
+    reviewProfileId: string;
+    instructions: string;
+    baseCommit: string;
+    now: string;
+  }): Cycle;
+  get(id: CycleId): Cycle | null;
+  active(workItemId: WorkItemId): Cycle | null;
+  listActive(): Cycle[];
+  update(id: CycleId, patch: CyclePatch, now: string): Cycle;
+}
+
+export interface ReviewRepository {
+  insert(input: {
+    cycleId: CycleId;
+    runId: RunId | null;
+    iteration: number;
+    verdict: ReviewVerdict;
+    summary: string;
+    now: string;
+  }): Review;
+  insertFinding(input: Omit<Finding, 'id'>): Finding;
+  get(id: ReviewId): Review | null;
+  latestForCycle(cycleId: CycleId): Review | null;
+  findings(reviewId: ReviewId): Finding[];
 }
 
 export interface DecisionRepository {
@@ -148,16 +210,30 @@ export interface CleanupFailure {
   readonly message: string;
 }
 
+export interface WriterOptions {
+  /**
+   * Bytes set aside from the shared cache budget when the writer is created; the writer uses
+   * them before anything else and never more. Creating it fails with RESULT_STORAGE_EXHAUSTED
+   * if they are not available.
+   */
+  readonly reserveBytes?: number;
+}
+
 export interface OutputWriter {
   write(chunk: Uint8Array): void;
-  close(): Promise<{ bytes: number; truncated: boolean }>;
+  /** `truncated`: output beyond the budget or reservation was dropped; `failed`: a write error. */
+  close(): Promise<{ bytes: number; truncated: boolean; failed: boolean }>;
 }
 
 /** Ephemeral, size-capped storage for agent output and other disposable data. */
 export interface EphemeralStore {
   measureBytes(): Promise<number>;
-  createWriter(ref: string): OutputWriter;
+  createWriter(ref: string, options?: WriterOptions): OutputWriter;
   readTail(ref: string, maxBytes: number): Promise<string | null>;
+  /** The first `maxBytes` bytes of an entry, or null if it does not exist. */
+  readHead(ref: string, maxBytes: number): Promise<string | null>;
+  /** Absolute path of an entry, for agents that take a file argument. */
+  absolutePath(ref: string): string;
   remove(refs: readonly string[]): Promise<CleanupFailure[]>;
   sweep(options: {
     expiresBefore: Date;
@@ -177,11 +253,33 @@ export interface GitInspector {
   /** Returns null when the path does not exist or is not inside a git worktree. */
   observe(path: string): Promise<ObservedWorkspace | null>;
   listWorktrees(repositoryPath: string): Promise<WorktreeEntry[]>;
+  /** The commit `ref` names in the worktree, or null if it names none. */
+  resolveCommit(worktreeRoot: string, ref: string): Promise<string | null>;
+  /**
+   * The worktree's changes against `baseCommit`: status (including untracked files) and the
+   * diff of tracked files. Reads at most `maxBytes` of them; `complete` is false beyond that.
+   */
+  changes(worktreeRoot: string, baseCommit: string, maxBytes: number): Promise<ChangeEvidence>;
+}
+
+export interface ChangeEvidence {
+  readonly baseCommit: string;
+  readonly head: string | null;
+  readonly status: string;
+  readonly diff: string;
+  readonly complete: boolean;
 }
 
 export interface AgentRunRequest {
   readonly policy: FilesystemPolicy;
   readonly prompt: string;
+  /**
+   * What this run may do. Adapters translate it into the CLI's own controls and grant nothing
+   * beyond it that those controls can withhold, so a review without workspaceWrite cannot edit.
+   */
+  readonly capabilities: readonly AgentCapability[];
+  /** Present when the run must end with a JSON result matching `schema`. */
+  readonly result: { readonly schema: Record<string, unknown>; readonly schemaPath: string } | null;
 }
 
 export interface AgentInvocation {
@@ -191,11 +289,25 @@ export interface AgentInvocation {
   readonly stdin: string;
 }
 
-/** Agent-specific behaviour lives behind this interface and nowhere else. */
+/**
+ * How to run one kind of agent CLI. Everything specific to a concrete CLI (flags, sandbox and
+ * permission modes, the structured-output mechanism, output envelopes) lives behind this
+ * interface and nowhere else.
+ */
 export interface AgentAdapter {
-  readonly name: string;
-  readonly command: string;
-  buildInvocation(request: AgentRunRequest): AgentInvocation;
+  /** Referenced by Agent Profiles in the configuration. */
+  readonly id: string;
+  readonly defaultCommand: string;
+  /** What the adapter can make its CLI do; a profile can only narrow this. */
+  readonly capabilities: readonly AgentCapability[];
+  buildInvocation(command: string, request: AgentRunRequest): AgentInvocation;
+  /** Largest stdout Orvia must keep to read a structured result of up to `resultBytes`. */
+  resultStdoutBytes(resultBytes: number): number;
+  /**
+   * The structured result's JSON text from the agent's stdout, unwrapped from any
+   * agent-specific envelope; null if the agent reported no result.
+   */
+  extractResult(stdout: string): string | null;
 }
 
 export interface ProcessExit {
@@ -221,7 +333,10 @@ export interface RunningProcess {
 
 export interface ProcessLauncher {
   resolveCommand(command: string): Promise<string | null>;
-  launch(invocation: AgentInvocation, onOutput: (chunk: Uint8Array) => void): RunningProcess;
+  launch(
+    invocation: AgentInvocation,
+    onOutput: (chunk: Uint8Array, stream: 'stdout' | 'stderr') => void,
+  ): RunningProcess;
 }
 
 export interface Clock {

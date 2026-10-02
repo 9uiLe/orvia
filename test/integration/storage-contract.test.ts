@@ -373,7 +373,9 @@ describe('storage contract: database_max_mb is never exceeded', () => {
       const run = store.transaction(() =>
         store.runs.insert({
           workItemId: item.id as `W-${number}`,
-          agent: 'fake',
+          profileId: 'fake',
+          purpose: 'manual',
+          cycleId: null,
           outputRef: `runs/${i}.log`,
           now: new Date().toISOString(),
         }),
@@ -411,7 +413,9 @@ describe('storage contract: database_max_mb is never exceeded', () => {
       const run = store.transaction(() =>
         store.runs.insert({
           workItemId: item.id,
-          agent: 'fake',
+          profileId: 'fake',
+          purpose: 'manual',
+          cycleId: null,
           outputRef: `runs/${i}.log`,
           now: new Date().toISOString(),
         }),
@@ -492,7 +496,7 @@ describe('storage contract: database_max_mb is never exceeded', () => {
     );
     const owner = d.app.deps.store.runs.get(stillRunning as `R-${number}`)?.workItemId;
     const refused = await rejectsWith(
-      call(d.app, 'start_run', { workItemId: owner, agent: 'fake', instructions: 'go' }),
+      call(d.app, 'start_run', { workItemId: owner, profileId: 'fake', instructions: 'go' }),
       'RECOVERY_INCOMPLETE',
     );
     assert.match(refused.message, /storage\.database_max_mb/);
@@ -538,7 +542,9 @@ describe('storage contract: database_max_mb is never exceeded', () => {
         store.transaction(() =>
           store.runs.insert({
             workItemId: item.id,
-            agent: 'fake',
+            profileId: 'fake',
+            purpose: 'manual',
+            cycleId: null,
             outputRef: `runs/halfway-${i}.log`,
             now: '2026-01-01T00:00:00.000Z',
           }),

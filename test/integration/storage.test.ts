@@ -70,7 +70,7 @@ describe('bounded storage', () => {
   async function runToEnd(d: Daemon, workItemId: string): Promise<AgentRun> {
     const run = await call<AgentRun>(d.app, 'start_run', {
       workItemId,
-      agent: 'fake',
+      profileId: 'fake',
       instructions: 'go',
     });
     await d.app.runs.waitForRun(run.id);
@@ -133,7 +133,7 @@ describe('bounded storage', () => {
       'STORAGE_HARD_LIMIT',
     );
     await rejectsWith(
-      call(d.app, 'start_run', { workItemId: item.id, agent: 'fake', instructions: 'go' }),
+      call(d.app, 'start_run', { workItemId: item.id, profileId: 'fake', instructions: 'go' }),
       'STORAGE_HARD_LIMIT',
     );
     await call(d.app, 'get_status');
@@ -233,7 +233,7 @@ describe('bounded storage', () => {
     agent.mode = `wait:${release}`;
     const run = await call<AgentRun>(d.app, 'start_run', {
       workItemId: item.id,
-      agent: 'fake',
+      profileId: 'fake',
       instructions: 'go',
     });
     writeCacheFile('filler.log', Math.ceil(0.9 * MIB), 1);

@@ -5,16 +5,9 @@ import { afterEach, beforeEach, describe, test } from 'node:test';
 import type { AgentRun } from '../../src/domain/records.ts';
 import type { WorkItem } from '../../src/domain/work-item.ts';
 import type { Daemon } from '../../src/interface/daemon/daemon.ts';
-import { call, FakeAgent, rejectsWith, startTestDaemon } from '../helpers/app.ts';
-import { makeTestEnv, type TestEnv } from '../helpers/env.ts';
+import { call, FakeAgent, rejectsWith, startTestDaemon, until } from '../helpers/app.ts';
+import { makeTestEnv, silentLogger, type TestEnv } from '../helpers/env.ts';
 import { addWorktree, createRepository } from '../helpers/git.ts';
-
-async function until(condition: () => boolean): Promise<void> {
-  for (let i = 0; i < 500 && !condition(); i++) {
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  assert.ok(condition(), 'condition was not reached');
-}
 
 describe('agent runs', () => {
   let env: TestEnv;
@@ -44,7 +37,7 @@ describe('agent runs', () => {
   function start(): Promise<AgentRun> {
     return call<AgentRun>(daemon.app, 'start_run', {
       workItemId: item.id,
-      agent: 'fake',
+      profileId: 'fake',
       instructions: 'go',
     });
   }
@@ -103,6 +96,23 @@ describe('agent runs', () => {
     assert.equal(state.exitCode, 3);
   });
 
+  test('stopping the daemon during a run logs no error', async () => {
+    const errors: string[] = [];
+    await daemon.close();
+    daemon = await startTestDaemon(env, {
+      agent,
+      logger: { ...silentLogger, error: (message) => errors.push(message) },
+    });
+    agent.mode = `wait:${release}`;
+    const run = await start();
+    await until(() => existsSync(join(env.paths.cacheDir, run.outputRef ?? '')));
+    await daemon.close();
+    // Cleanup that would run after the database is closed is skipped.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(errors, []);
+    daemon = await startTestDaemon(env, { agent });
+  });
+
   test('runs left running by a stopped daemon are marked interrupted on restart', async () => {
     agent.mode = `wait:${release}`;
     const run = await start();
@@ -139,10 +149,10 @@ describe('agent runs', () => {
     assert.match(prompt, /\[reject\] do not touch the public API/);
   });
 
-  test('an unknown agent is refused before anything is recorded', async () => {
+  test('an unknown profile is refused before anything is recorded', async () => {
     await rejectsWith(
-      call(daemon.app, 'start_run', { workItemId: item.id, agent: 'nope', instructions: 'go' }),
-      'AGENT_UNAVAILABLE',
+      call(daemon.app, 'start_run', { workItemId: item.id, profileId: 'nope', instructions: 'go' }),
+      'AGENT_PROFILE_NOT_FOUND',
     );
     const details = await call<{ runs: AgentRun[] }>(daemon.app, 'get_work_item', {
       workItemId: item.id,

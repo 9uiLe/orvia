@@ -1,6 +1,8 @@
 import * as z from 'zod/v4';
 import { OrviaError } from '../domain/errors.ts';
 import { idPattern, type EntityKind, type IdByKind } from '../domain/ids.ts';
+import { describeProfiles } from './agent-profiles.ts';
+import { CYCLE_MODES } from '../domain/cycle.ts';
 import { PLAN_STATUSES } from '../domain/plan.ts';
 import { assertOperationAllowed, type OperationClass } from '../domain/storage.ts';
 import { WORK_ITEM_STATUSES } from '../domain/work-item.ts';
@@ -62,6 +64,9 @@ const ID_EXAMPLE: Record<EntityKind, string> = {
   run: 'R-1',
   decision: 'D-1',
   note: 'N-1',
+  cycle: 'C-1',
+  review: 'Rv-1',
+  finding: 'F-1',
 };
 
 function id<K extends EntityKind>(kind: K, description: string): z.ZodType<IdByKind[K]> {
@@ -209,10 +214,99 @@ export const OPERATIONS: readonly Operation[] = [
     operationClass: 'agent_run',
     input: z.object({
       workItemId: id('workItem', 'Work Item id'),
-      agent: text('Agent adapter name, e.g. codex or claude'),
+      profileId: text('Agent Profile to run (see list_agent_profiles)'),
       instructions: text('What the agent should do in this run'),
     }),
     handler: (app, input) => app.runs.start(input),
+  }),
+  defineOperation({
+    name: 'list_agent_profiles',
+    title: 'List agent profiles',
+    description:
+      'The configured Agent Profiles: the adapter each uses, whether its command is available, its effective capabilities, and the cycle stages it can run; plus the default profiles for start_cycle.',
+    operationClass: 'read',
+    input: z.object({}),
+    handler: async (app) => ({
+      profiles: await describeProfiles(app.deps.profiles, app.deps.launcher),
+      defaults: {
+        implementationProfileId: app.deps.orchestration.defaultImplementationProfile,
+        reviewProfileId: app.deps.orchestration.defaultReviewProfile,
+      },
+    }),
+  }),
+  defineOperation({
+    name: 'start_cycle',
+    title: 'Start cycle',
+    description:
+      'Start an orchestration cycle for a Work Item. `implement` runs implement → verify → review; `review_existing` verifies and reviews changes already in the worktree. Routine findings are fixed automatically (verify → review again); findings that need a human stop the cycle in NEEDS_HUMAN. The cycle ends at HUMAN_REVIEW_READY. One active cycle per Work Item. Experimental.',
+    operationClass: 'agent_run',
+    input: z.object({
+      workItemId: id('workItem', 'Work Item id'),
+      mode: z.enum(CYCLE_MODES),
+      instructions: text('What the change should achieve'),
+      implementationProfileId: text(
+        'Agent Profile for implementing, verifying, and fixing; defaults to orchestration.default_implementation_profile',
+      ).optional(),
+      reviewProfileId: text(
+        'Agent Profile for reviewing; defaults to orchestration.default_review_profile',
+      ).optional(),
+      baseRef: text(
+        'Commit or ref the changes are reviewed against; defaults to HEAD when the cycle starts',
+      ).optional(),
+    }),
+    handler: (app, input) => app.cycles.start(input),
+  }),
+  defineOperation({
+    name: 'get_cycle',
+    title: 'Get cycle',
+    description:
+      'A cycle with its state, the reason it is waiting (if any), its runs, the latest review, and the ids of findings that need a human decision.',
+    operationClass: 'read',
+    input: z.object({ cycleId: id('cycle', 'Cycle id') }),
+    handler: (app, input) => app.cycles.get(input),
+  }),
+  defineOperation({
+    name: 'get_current_review',
+    title: 'Get current review',
+    description: "The cycle's latest review and its findings, each with Orvia's policy action.",
+    operationClass: 'read',
+    input: z.object({ cycleId: id('cycle', 'Cycle id') }),
+    handler: (app, input) => app.cycles.currentReview(input),
+  }),
+  defineOperation({
+    name: 'get_review',
+    title: 'Get review',
+    description: 'Any review by id, with its findings; earlier reviews are kept for history.',
+    operationClass: 'read',
+    input: z.object({ reviewId: id('review', 'Review id') }),
+    handler: (app, input) => app.cycles.review(input),
+  }),
+  defineOperation({
+    name: 'pause_cycle',
+    title: 'Pause cycle',
+    description:
+      "Pause a cycle. Returns after the running agent's whole process tree has stopped; fails with AGENT_TERMINATION_FAILED otherwise and the cycle keeps running.",
+    operationClass: 'control',
+    input: z.object({ cycleId: id('cycle', 'Cycle id') }),
+    handler: (app, input) => app.cycles.pause(input),
+  }),
+  defineOperation({
+    name: 'resume_cycle',
+    title: 'Resume cycle',
+    description:
+      'Resume a PAUSED, BLOCKED, or NEEDS_HUMAN cycle. Record decisions (record_decision) or context (add_context) first; the next stage uses the latest ones. After NEEDS_HUMAN the cycle reviews again, or verifies first if the code may have changed since it last passed verification.',
+    operationClass: 'agent_run',
+    input: z.object({ cycleId: id('cycle', 'Cycle id') }),
+    handler: (app, input) => app.cycles.resume(input),
+  }),
+  defineOperation({
+    name: 'cancel_cycle',
+    title: 'Cancel cycle',
+    description:
+      'End a cycle. A running agent is stopped first. The Work Item and its worktree are left as they are.',
+    operationClass: 'control',
+    input: z.object({ cycleId: id('cycle', 'Cycle id') }),
+    handler: (app, input) => app.cycles.cancel(input),
   }),
   defineOperation({
     name: 'get_run_output',
