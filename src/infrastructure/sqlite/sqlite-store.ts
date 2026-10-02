@@ -1,6 +1,9 @@
 import type { DatabaseSync, SQLInputValue, StatementSync } from 'node:sqlite';
 import type {
+  CyclePatch,
+  CycleRepository,
   DatabaseMaintenance,
+  ReviewRepository,
   DecisionRepository,
   NoteRepository,
   PlanRepository,
@@ -18,6 +21,8 @@ import {
   parseId,
   type DecisionId,
   type PlanId,
+  type CycleId,
+  type ReviewId,
   type RunId,
   type WorkItemId,
 } from '../../domain/ids.ts';
@@ -27,7 +32,24 @@ import {
   type DatabaseCapacity,
   type DatabaseShape,
 } from '../../domain/storage.ts';
-import type { AgentRun, Decision, Note, NoteKind, RunStatus } from '../../domain/records.ts';
+import type {
+  AgentRun,
+  Decision,
+  Note,
+  NoteKind,
+  RunPurpose,
+  RunStatus,
+} from '../../domain/records.ts';
+import type { Cycle, CycleMode, CycleReason, CycleState, StageState } from '../../domain/cycle.ts';
+import type {
+  Evidence,
+  Finding,
+  FindingCategory,
+  PolicyAction,
+  PolicyReason,
+  Review,
+  ReviewVerdict,
+} from '../../domain/review.ts';
 import { WORK_ITEM_STATUSES, type WorkItem, type WorkItemStatus } from '../../domain/work-item.ts';
 import { isUniqueViolation, translateSqliteError } from './database.ts';
 import {
@@ -104,17 +126,70 @@ function rowToWorkItem(row: Row): WorkItem {
 }
 
 function rowToRun(row: Row): AgentRun {
+  const cycle = numOrNull(row, 'cycle_id');
   return {
     id: formatId('run', num(row, 'id')),
     workItemId: formatId('workItem', num(row, 'work_item_id')),
+    cycleId: cycle === null ? null : formatId('cycle', cycle),
+    purpose: str(row, 'purpose') as RunPurpose,
     agent: str(row, 'agent'),
     status: str(row, 'status') as RunStatus,
     exitCode: numOrNull(row, 'exit_code'),
     outputRef: strOrNull(row, 'output_ref'),
     outputBytes: num(row, 'output_bytes'),
     outputTruncated: num(row, 'output_truncated') === 1,
+    result: strOrNull(row, 'result'),
     startedAt: str(row, 'started_at'),
     finishedAt: strOrNull(row, 'finished_at'),
+  };
+}
+
+function rowToCycle(row: Row): Cycle {
+  const currentRun = numOrNull(row, 'current_run_id');
+  return {
+    id: formatId('cycle', num(row, 'id')),
+    workItemId: formatId('workItem', num(row, 'work_item_id')),
+    mode: str(row, 'mode') as CycleMode,
+    state: str(row, 'state') as CycleState,
+    reason: strOrNull(row, 'reason') as CycleReason | null,
+    resumeStage: strOrNull(row, 'resume_stage') as StageState | null,
+    iteration: num(row, 'iteration'),
+    autoFixRounds: num(row, 'auto_fix_rounds'),
+    maxAutoFixRounds: num(row, 'max_auto_fix_rounds'),
+    implementationAgent: str(row, 'implementation_agent'),
+    reviewAgent: str(row, 'review_agent'),
+    instructions: str(row, 'instructions'),
+    currentRunId: currentRun === null ? null : formatId('run', currentRun),
+    startedAt: str(row, 'started_at'),
+    updatedAt: str(row, 'updated_at'),
+    completedAt: strOrNull(row, 'completed_at'),
+  };
+}
+
+function rowToReview(row: Row): Review {
+  const runId = numOrNull(row, 'run_id');
+  return {
+    id: formatId('review', num(row, 'id')),
+    cycleId: formatId('cycle', num(row, 'cycle_id')),
+    runId: runId === null ? null : formatId('run', runId),
+    iteration: num(row, 'iteration'),
+    verdict: str(row, 'verdict') as ReviewVerdict,
+    summary: str(row, 'summary'),
+    createdAt: str(row, 'created_at'),
+  };
+}
+
+function rowToFinding(row: Row): Finding {
+  return {
+    id: formatId('finding', num(row, 'id')),
+    reviewId: formatId('review', num(row, 'review_id')),
+    category: str(row, 'category') as FindingCategory,
+    title: str(row, 'title'),
+    detail: str(row, 'detail'),
+    evidence: JSON.parse(str(row, 'evidence')) as Evidence[],
+    suggestedAction: strOrNull(row, 'suggested_action'),
+    policyAction: str(row, 'policy_action') as PolicyAction,
+    policyReason: str(row, 'policy_reason') as PolicyReason,
   };
 }
 
@@ -165,6 +240,8 @@ export class SqliteStore implements Store {
   readonly runs: RunRepository;
   readonly decisions: DecisionRepository;
   readonly notes: NoteRepository;
+  readonly cycles: CycleRepository;
+  readonly reviews: ReviewRepository;
   readonly maintenance: DatabaseMaintenance;
   readonly #db: DatabaseSync;
   readonly #budget: StoreBudget;
@@ -290,6 +367,8 @@ export class SqliteStore implements Store {
           const result = run(
             w.insertRun,
             parseId('workItem', input.workItemId),
+            input.cycleId === null ? null : parseId('cycle', input.cycleId),
+            input.purpose,
             input.agent,
             input.outputRef,
             input.now,
@@ -325,7 +404,12 @@ export class SqliteStore implements Store {
       },
       listForWorkItem: (workItemId) =>
         all(q.listRunsForWorkItem, parseId('workItem', workItemId)).map((row) => rowToRun(row)),
+      listForCycle: (cycleId) =>
+        all(q.listRunsForCycle, parseId('cycle', cycleId)).map((row) => rowToRun(row)),
       listRunning: () => all(q.listRunningRuns).map((row) => rowToRun(row)),
+      setResult: (id, resultJson) => {
+        run(w.setRunResult, resultJson, parseId('run', id));
+      },
       markInterrupted: (id, now) => run(w.interruptRun, now, parseId('run', id)).changes === 1,
       listFinishedBeyond: (keep) =>
         all(w.finishedRunsBeyondKeep, keep).map((row) => ({
@@ -382,6 +466,108 @@ export class SqliteStore implements Store {
       },
       listForPlan: (planId) =>
         all(q.listNotesForPlan, parseId('plan', planId)).map((row) => rowToNote(row)),
+    };
+
+    const getCycle = (id: CycleId): Cycle | null => {
+      const row = one(q.getCycle, parseId('cycle', id));
+      return row === undefined ? null : rowToCycle(row);
+    };
+    this.cycles = {
+      insert: (input) => {
+        try {
+          const result = run(
+            w.insertCycle,
+            parseId('workItem', input.workItemId),
+            input.mode,
+            input.state,
+            input.maxAutoFixRounds,
+            input.implementationAgent,
+            input.reviewAgent,
+            input.instructions,
+            input.now,
+            input.now,
+          );
+          return mustGet(getCycle(formatId('cycle', Number(result.lastInsertRowid))), 'cycle');
+        } catch (error) {
+          if (isUniqueViolation(error)) {
+            throw new OrviaError(
+              'CYCLE_ACTIVE',
+              `work item ${input.workItemId} already has an active cycle`,
+              { workItemId: input.workItemId },
+            );
+          }
+          throw error;
+        }
+      },
+      get: getCycle,
+      active: (workItemId) => {
+        const row = one(q.getActiveCycle, parseId('workItem', workItemId));
+        return row === undefined ? null : rowToCycle(row);
+      },
+      listActive: () => all(q.listActiveCycles).map((row) => rowToCycle(row)),
+      update: (id, patch, now) => {
+        const current = mustGet(getCycle(id), `cycle ${id}`);
+        const pick = <K extends keyof CyclePatch>(
+          key: K,
+          fallback: NonNullable<CyclePatch[K]> | null,
+        ) => (patch[key] === undefined ? fallback : patch[key]);
+        const currentRunId = pick('currentRunId', current.currentRunId);
+        run(
+          w.updateCycle,
+          pick('state', current.state),
+          pick('reason', current.reason),
+          pick('resumeStage', current.resumeStage),
+          pick('iteration', current.iteration),
+          pick('autoFixRounds', current.autoFixRounds),
+          currentRunId === null ? null : parseId('run', currentRunId),
+          pick('completedAt', current.completedAt),
+          now,
+          parseId('cycle', id),
+        );
+        return mustGet(getCycle(id), `cycle ${id}`);
+      },
+    };
+
+    const getReview = (id: ReviewId): Review | null => {
+      const row = one(q.getReview, parseId('review', id));
+      return row === undefined ? null : rowToReview(row);
+    };
+    this.reviews = {
+      insert: (input) => {
+        const result = run(
+          w.insertReview,
+          parseId('cycle', input.cycleId),
+          input.runId === null ? null : parseId('run', input.runId),
+          input.iteration,
+          input.verdict,
+          input.summary,
+          input.now,
+        );
+        return mustGet(getReview(formatId('review', Number(result.lastInsertRowid))), 'review');
+      },
+      insertFinding: (input) => {
+        const result = run(
+          w.insertFinding,
+          parseId('review', input.reviewId),
+          input.category,
+          input.title,
+          input.detail,
+          JSON.stringify(input.evidence),
+          input.suggestedAction,
+          input.policyAction,
+          input.policyReason,
+        );
+        const row = one(w.getFinding, Number(result.lastInsertRowid));
+        if (row === undefined) throw new OrviaError('INTERNAL', 'inserted finding not found');
+        return rowToFinding(row);
+      },
+      get: getReview,
+      latestForCycle: (cycleId) => {
+        const row = one(q.getLatestReview, parseId('cycle', cycleId));
+        return row === undefined ? null : rowToReview(row);
+      },
+      findings: (reviewId) =>
+        all(q.listFindingsForReview, parseId('review', reviewId)).map((row) => rowToFinding(row)),
     };
 
     this.maintenance = {

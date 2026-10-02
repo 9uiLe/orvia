@@ -178,6 +178,37 @@ describe('database migrations', () => {
     }
   });
 
+  test('shipped 0001 data → 0002 orchestration: existing runs become manual runs', async () => {
+    const first = open(MIGRATIONS.slice(0, 1));
+    const at = '2026-01-01T00:00:00.000Z';
+    first.db.exec(`
+      INSERT INTO plans VALUES (1, 'P', '', 'active', '${at}', '${at}');
+      INSERT INTO work_items (id, plan_id, title, description, status, created_at, updated_at)
+        VALUES (1, 1, 'W', '', 'active', '${at}', '${at}');
+      INSERT INTO runs (id, work_item_id, agent, status, exit_code, output_ref, started_at, finished_at)
+        VALUES (1, 1, 'codex', 'succeeded', 0, 'runs/old.log', '${at}', '${at}');
+    `);
+    first.db.close();
+
+    const daemon = await startTestDaemon(env, { clock });
+    try {
+      assert.deepEqual(daemon.migration.applied, [2]);
+      const runs = await call<{ runs: { id: string; purpose: string; cycleId: unknown }[] }>(
+        daemon.app,
+        'get_work_item',
+        { workItemId: 'W-1' },
+      );
+      assert.deepEqual(
+        runs.runs.map((run) => [run.id, run.purpose, run.cycleId]),
+        [['R-1', 'manual', null]],
+      );
+      const status = await call<{ openWorkItems: { cycle: unknown }[] }>(daemon.app, 'get_status');
+      assert.equal(status.openWorkItems[0]?.cycle, null);
+    } finally {
+      await daemon.close();
+    }
+  });
+
   test('a failing migration rolls back completely', () => {
     open([v1]).db.close();
     const before = new DatabaseSync(env.paths.databaseFile);

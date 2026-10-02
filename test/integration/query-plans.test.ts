@@ -28,6 +28,13 @@ const PARAMS: Record<ReadQueryName, SQLInputValue[]> = {
   listDecisionsForPlan: [1],
   getNote: [1],
   listNotesForPlan: [1],
+  getCycle: [1],
+  getActiveCycle: [1],
+  listActiveCycles: [],
+  getReview: [1],
+  getLatestReview: [1],
+  listFindingsForReview: [1],
+  listRunsForCycle: [1],
 };
 
 /**
@@ -71,8 +78,8 @@ describe('query plans', () => {
     });
   }
 
-  // Sorting a Work Item list, the running runs, or a Work Item's runs uses a temporary b-tree. Its size is bounded
-  // by those rows, and temp_store = MEMORY keeps it off disk. Adding indexes to avoid these
+  // Sorting a Work Item list, the running runs, a Work Item's runs, or the active cycles (at most
+  // one per Work Item) uses a temporary b-tree. Its size is bounded by those rows, and temp_store = MEMORY keeps it off disk. Adding indexes to avoid these
   // sorts was not worth a migration; a new query that sorts should be a conscious choice.
   test('only the known, bounded sorts use temporary b-trees', () => {
     const queries: [string, string, SQLInputValue[]][] = [
@@ -90,6 +97,7 @@ describe('query plans', () => {
       )
       .map(([name]) => name);
     assert.deepEqual(sorting, [
+      'listActiveCycles',
       'listWorkItemsForPlan',
       'listWorkItemsForPlanByStatus',
       'listWorkItemsByStatus',

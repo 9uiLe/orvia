@@ -374,6 +374,8 @@ describe('storage contract: database_max_mb is never exceeded', () => {
         store.runs.insert({
           workItemId: item.id as `W-${number}`,
           agent: 'fake',
+          purpose: 'manual',
+          cycleId: null,
           outputRef: `runs/${i}.log`,
           now: new Date().toISOString(),
         }),
@@ -412,6 +414,8 @@ describe('storage contract: database_max_mb is never exceeded', () => {
         store.runs.insert({
           workItemId: item.id,
           agent: 'fake',
+          purpose: 'manual',
+          cycleId: null,
           outputRef: `runs/${i}.log`,
           now: new Date().toISOString(),
         }),
@@ -539,6 +543,8 @@ describe('storage contract: database_max_mb is never exceeded', () => {
           store.runs.insert({
             workItemId: item.id,
             agent: 'fake',
+            purpose: 'manual',
+            cycleId: null,
             outputRef: `runs/halfway-${i}.log`,
             now: '2026-01-01T00:00:00.000Z',
           }),

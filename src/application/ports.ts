@@ -1,6 +1,15 @@
-import type { DecisionId, PlanId, RunId, WorkItemId } from '../domain/ids.ts';
+import type { CycleId, DecisionId, PlanId, ReviewId, RunId, WorkItemId } from '../domain/ids.ts';
 import type { Plan, PlanStatus } from '../domain/plan.ts';
-import type { AgentRun, Decision, Note, NoteKind, RunStatus } from '../domain/records.ts';
+import type {
+  AgentRun,
+  Decision,
+  Note,
+  NoteKind,
+  RunPurpose,
+  RunStatus,
+} from '../domain/records.ts';
+import type { Cycle, CycleMode, CycleReason, CycleState, StageState } from '../domain/cycle.ts';
+import type { Finding, Review, ReviewVerdict } from '../domain/review.ts';
 import type { FilesystemPolicy } from '../domain/sandbox.ts';
 import type { DatabaseCapacity, DatabaseShape, DatabaseUsage } from '../domain/storage.ts';
 import type { WorkItem, WorkItemStatus } from '../domain/work-item.ts';
@@ -25,6 +34,8 @@ export interface Store {
   readonly runs: RunRepository;
   readonly decisions: DecisionRepository;
   readonly notes: NoteRepository;
+  readonly cycles: CycleRepository;
+  readonly reviews: ReviewRepository;
   readonly maintenance: DatabaseMaintenance;
 }
 
@@ -71,8 +82,12 @@ export interface RunRepository {
     workItemId: WorkItemId;
     agent: string;
     outputRef: string;
+    purpose: RunPurpose;
+    cycleId: CycleId | null;
     now: string;
   }): AgentRun;
+  /** Stores a validated, size-checked structured result. */
+  setResult(id: RunId, resultJson: string): void;
   finish(
     id: RunId,
     result: {
@@ -86,6 +101,8 @@ export interface RunRepository {
   get(id: RunId): AgentRun | null;
   current(workItemId: WorkItemId): AgentRun | null;
   listForWorkItem(workItemId: WorkItemId): AgentRun[];
+  /** Newest first. */
+  listForCycle(cycleId: CycleId): AgentRun[];
   listRunning(): AgentRun[];
   /** Returns false if the run was no longer running. */
   markInterrupted(id: RunId, now: string): boolean;
@@ -93,6 +110,49 @@ export interface RunRepository {
   listFinishedBeyond(keep: number): { runId: RunId; outputRef: string | null }[];
   delete(id: RunId): void;
   listOutputRefs(): string[];
+}
+
+export interface CyclePatch {
+  state?: CycleState;
+  reason?: CycleReason | null;
+  resumeStage?: StageState | null;
+  iteration?: number;
+  autoFixRounds?: number;
+  currentRunId?: RunId | null;
+  completedAt?: string | null;
+}
+
+export interface CycleRepository {
+  /** Throws CYCLE_ACTIVE when the Work Item already has an active cycle. */
+  insert(input: {
+    workItemId: WorkItemId;
+    mode: CycleMode;
+    state: StageState;
+    maxAutoFixRounds: number;
+    implementationAgent: string;
+    reviewAgent: string;
+    instructions: string;
+    now: string;
+  }): Cycle;
+  get(id: CycleId): Cycle | null;
+  active(workItemId: WorkItemId): Cycle | null;
+  listActive(): Cycle[];
+  update(id: CycleId, patch: CyclePatch, now: string): Cycle;
+}
+
+export interface ReviewRepository {
+  insert(input: {
+    cycleId: CycleId;
+    runId: RunId | null;
+    iteration: number;
+    verdict: ReviewVerdict;
+    summary: string;
+    now: string;
+  }): Review;
+  insertFinding(input: Omit<Finding, 'id'>): Finding;
+  get(id: ReviewId): Review | null;
+  latestForCycle(cycleId: CycleId): Review | null;
+  findings(reviewId: ReviewId): Finding[];
 }
 
 export interface DecisionRepository {
@@ -158,6 +218,10 @@ export interface EphemeralStore {
   measureBytes(): Promise<number>;
   createWriter(ref: string): OutputWriter;
   readTail(ref: string, maxBytes: number): Promise<string | null>;
+  /** The first `maxBytes` bytes of an entry, or null if it does not exist. */
+  readHead(ref: string, maxBytes: number): Promise<string | null>;
+  /** Absolute path of an entry, for agents that take a file argument. */
+  absolutePath(ref: string): string;
   remove(refs: readonly string[]): Promise<CleanupFailure[]>;
   sweep(options: {
     expiresBefore: Date;
@@ -182,6 +246,10 @@ export interface GitInspector {
 export interface AgentRunRequest {
   readonly policy: FilesystemPolicy;
   readonly prompt: string;
+  /** `read-only` roles (review) must not change files; adapters map it to the agent's own controls. */
+  readonly access: 'edit' | 'read-only';
+  /** Present when the run must end with a JSON result matching `schema`. */
+  readonly result: { readonly schema: Record<string, unknown>; readonly schemaPath: string } | null;
 }
 
 export interface AgentInvocation {
@@ -196,6 +264,11 @@ export interface AgentAdapter {
   readonly name: string;
   readonly command: string;
   buildInvocation(request: AgentRunRequest): AgentInvocation;
+  /**
+   * The structured result's JSON text from the agent's stdout, unwrapped from any
+   * agent-specific envelope; null if the agent reported no result.
+   */
+  extractResult(stdout: string): string | null;
 }
 
 export interface ProcessExit {
@@ -221,7 +294,10 @@ export interface RunningProcess {
 
 export interface ProcessLauncher {
   resolveCommand(command: string): Promise<string | null>;
-  launch(invocation: AgentInvocation, onOutput: (chunk: Uint8Array) => void): RunningProcess;
+  launch(
+    invocation: AgentInvocation,
+    onOutput: (chunk: Uint8Array, stream: 'stdout' | 'stderr') => void,
+  ): RunningProcess;
 }
 
 export interface Clock {

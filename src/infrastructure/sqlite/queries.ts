@@ -1,3 +1,5 @@
+import { ACTIVE_STATES } from '../../domain/cycle.ts';
+
 /**
  * Every read the application performs, by name. The schema's indexes are derived from these;
  * test/integration/query-plans.test.ts checks them with EXPLAIN QUERY PLAN.
@@ -6,13 +8,31 @@ const PLAN_COLUMNS = 'id, title, description, status, created_at, updated_at';
 const WORK_ITEM_COLUMNS = `id, plan_id, split_from_id, title, description, status, branch,
   repository_common_dir, repository_common_dir_file_id, worktree_git_dir,
   worktree_git_dir_file_id, worktree_root, pr_url, created_at, updated_at`;
-const RUN_COLUMNS = `id, work_item_id, agent, status, exit_code, output_ref, output_bytes,
-  output_truncated, started_at, finished_at`;
+const RUN_COLUMNS = `id, work_item_id, cycle_id, purpose, agent, status, exit_code, output_ref,
+  output_bytes, output_truncated, result, started_at, finished_at`;
+const CYCLE_COLUMNS = `id, work_item_id, mode, state, reason, resume_stage, iteration,
+  auto_fix_rounds, max_auto_fix_rounds, implementation_agent, review_agent, instructions,
+  current_run_id, started_at, updated_at, completed_at`;
+const ACTIVE_CYCLE_STATES = ACTIVE_STATES.map((state) => `'${state}'`).join(', ');
+const REVIEW_COLUMNS = 'id, cycle_id, run_id, iteration, verdict, summary, created_at';
+const FINDING_COLUMNS = `id, review_id, category, title, detail, evidence, suggested_action,
+  policy_action, policy_reason`;
 const DECISION_COLUMNS =
   'id, plan_id, work_item_id, title, body, status, supersedes_id, created_at';
 const NOTE_COLUMNS = 'id, plan_id, work_item_id, kind, body, created_at';
 
 export const READ_QUERIES = {
+  getCycle: `SELECT ${CYCLE_COLUMNS} FROM cycles WHERE id = ?`,
+  getActiveCycle: `SELECT ${CYCLE_COLUMNS} FROM cycles
+    WHERE work_item_id = ? AND state IN (${ACTIVE_CYCLE_STATES})`,
+  listActiveCycles: `SELECT ${CYCLE_COLUMNS} FROM cycles
+    WHERE state IN (${ACTIVE_CYCLE_STATES}) ORDER BY id`,
+  getReview: `SELECT ${REVIEW_COLUMNS} FROM reviews WHERE id = ?`,
+  getLatestReview: `SELECT ${REVIEW_COLUMNS} FROM reviews WHERE cycle_id = ?
+    ORDER BY id DESC LIMIT 1`,
+  listFindingsForReview: `SELECT ${FINDING_COLUMNS} FROM review_findings WHERE review_id = ?
+    ORDER BY id`,
+
   getPlan: `SELECT ${PLAN_COLUMNS} FROM plans WHERE id = ?`,
   listPlansByStatus: `SELECT ${PLAN_COLUMNS} FROM plans WHERE status = ? ORDER BY id`,
   countPlansByStatus: 'SELECT status, count(*) AS n FROM plans GROUP BY status',
@@ -28,6 +48,7 @@ export const READ_QUERIES = {
   getRun: `SELECT ${RUN_COLUMNS} FROM runs WHERE id = ?`,
   getCurrentRun: `SELECT ${RUN_COLUMNS} FROM runs WHERE work_item_id = ? AND status = 'running'`,
   listRunsForWorkItem: `SELECT ${RUN_COLUMNS} FROM runs WHERE work_item_id = ? ORDER BY id DESC`,
+  listRunsForCycle: `SELECT ${RUN_COLUMNS} FROM runs WHERE cycle_id = ? ORDER BY id DESC`,
   listRunningRuns: `SELECT ${RUN_COLUMNS} FROM runs WHERE status = 'running' ORDER BY id`,
 
   getDecision: `SELECT ${DECISION_COLUMNS} FROM decisions WHERE id = ?`,
@@ -51,8 +72,19 @@ export const WRITE_STATEMENTS = {
     worktree_git_dir = ?, worktree_git_dir_file_id = ?, worktree_root = ?, updated_at = ?
     WHERE id = ?`,
 
-  insertRun: `INSERT INTO runs (work_item_id, agent, status, output_ref, started_at)
-    VALUES (?, ?, 'running', ?, ?)`,
+  insertRun: `INSERT INTO runs (work_item_id, cycle_id, purpose, agent, status, output_ref,
+    started_at) VALUES (?, ?, ?, ?, 'running', ?, ?)`,
+  setRunResult: 'UPDATE runs SET result = ? WHERE id = ?',
+  insertCycle: `INSERT INTO cycles (work_item_id, mode, state, max_auto_fix_rounds,
+    implementation_agent, review_agent, instructions, started_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  updateCycle: `UPDATE cycles SET state = ?, reason = ?, resume_stage = ?, iteration = ?,
+    auto_fix_rounds = ?, current_run_id = ?, completed_at = ?, updated_at = ? WHERE id = ?`,
+  insertReview: `INSERT INTO reviews (cycle_id, run_id, iteration, verdict, summary, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)`,
+  insertFinding: `INSERT INTO review_findings (review_id, category, title, detail, evidence,
+    suggested_action, policy_action, policy_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  getFinding: `SELECT ${FINDING_COLUMNS} FROM review_findings WHERE id = ?`,
   finishRun: `UPDATE runs SET status = ?, exit_code = ?, output_bytes = ?, output_truncated = ?,
     finished_at = ? WHERE id = ? AND status = 'running'`,
   interruptRun: `UPDATE runs SET status = 'interrupted', finished_at = ?
