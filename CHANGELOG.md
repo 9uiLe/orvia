@@ -20,6 +20,22 @@ Before 1.0.0, minor versions may contain breaking changes.
 - Configurable storage limits with pressure levels, automatic cleanup, and `HARD_LIMIT` gating.
 - `orvia` CLI, local IPC socket, and an MCP server over stdio.
 - JSON configuration (`config.json`) validated at startup.
+- Experimental orchestration cycles (`start_cycle`, `get_cycle`, `pause_cycle`, `resume_cycle`,
+  `cancel_cycle`): implement → verify → review, automatic fixes for routine findings and failed
+  checks, and escalation to `NEEDS_HUMAN` when a human decision is needed. A cycle ends at
+  `HUMAN_REVIEW_READY`; Orvia does not create or merge PRs. At most one active cycle per Work
+  Item.
+- Durable reviews and size-limited structured findings (`get_current_review`, `get_review`),
+  each classified by a fixed policy as an automatic fix or a question for the human.
+- Structured stage results: Codex `--output-schema` and Claude Code `--json-schema`, validated
+  by Orvia and rejected (never truncated or interpreted) when invalid.
+- `orchestration.max_review_fix_cycles` (default 3): automatic fix rounds before a cycle stops
+  at `NEEDS_HUMAN / LOOP_LIMIT`; the count restarts when a human resumes.
+- `get_status` shows each open Work Item's active cycle.
+- Agent prompts state an instruction precedence and treat repository content other than
+  AGENTS.md / CLAUDE.md as data.
+- Database migration 0002: `cycles`, `reviews`, `review_findings`, and a purpose, cycle, and
+  result for runs. Existing runs become manual runs.
 
 ### Fixed
 
@@ -45,6 +61,10 @@ Before 1.0.0, minor versions may contain breaking changes.
 
 ### Changed
 
+- `start_run`, `complete_work_item`, and `archive_work_item` are refused with `CYCLE_ACTIVE`
+  while the Work Item has an active cycle. `pause_work_item` also pauses that cycle.
+- After a daemon restart, cycles that were running a stage are `BLOCKED / RUN_INTERRUPTED`;
+  nothing is relaunched until a human resumes them.
 - Database writes are a few tenths of a millisecond slower (rollback journal; see
   `docs/benchmarks/2026-10-02-journal-mode.md`), and data can use about half of the database
   budget left after backups.

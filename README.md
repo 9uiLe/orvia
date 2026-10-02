@@ -13,7 +13,8 @@ published to any package registry yet.
 Orvia is a local daemon that keeps track of what coding agents (Codex, Claude Code, and others)
 are working on, where, and under which human decisions. You talk to it from ChatGPT (through
 MCP) or from the `orvia` CLI. Agents work on their own; you watch, and you step in when you
-choose to.
+choose to. An orchestration cycle lets agents implement, verify, review, and fix routine
+problems without you, and stops when a human decision is needed.
 
 ## Why does it exist?
 
@@ -27,15 +28,16 @@ state outside the agents and outside your repositories, and makes it explicit.
 Agents proceed without asking for approval on every step (that would be human-in-the-loop).
 The human stays able to act at any time:
 
-| Action                                      | How                                                          | Status                                                                                                                   |
-| ------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
-| Observe                                     | `get_status`, `get_plan`, `get_work_item`, `get_run_output`  | Implemented                                                                                                              |
-| Pause / resume                              | `pause_work_item`, `resume_work_item`                        | Implemented. Pause returns only after the agent and the processes it started have stopped (macOS/Linux; see below).      |
-| Add context                                 | `add_context` (Plan or Work Item)                            | Implemented                                                                                                              |
-| Redirect / reject / comment                 | `submit_feedback` with `kind`                                | Implemented: recorded and included in the next agent prompt. It does not stop a running agent by itself; pause for that. |
-| Record or change a decision                 | `record_decision`, with `supersedesDecisionId` to change one | Implemented                                                                                                              |
-| Rollback                                    | —                                                            | Not implemented (needs git changes; planned as an explicit feature)                                                      |
-| Escalation of design questions to the human | —                                                            | Planned                                                                                                                  |
+| Action                                      | How                                                                                              | Status                                                                                                                   |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
+| Observe                                     | `get_status`, `get_plan`, `get_work_item`, `get_run_output`                                      | Implemented                                                                                                              |
+| Pause / resume                              | `pause_work_item`, `resume_work_item`                                                            | Implemented. Pause returns only after the agent and the processes it started have stopped (macOS/Linux; see below).      |
+| Pause / resume a cycle                      | `pause_cycle`, `resume_cycle`, `cancel_cycle`                                                    | Implemented with the same process guarantee as Work Item pause (see [Orchestration cycles](#orchestration-cycles)).      |
+| Add context                                 | `add_context` (Plan or Work Item)                                                                | Implemented                                                                                                              |
+| Redirect / reject / comment                 | `submit_feedback` with `kind`                                                                    | Implemented: recorded and included in the next agent prompt. It does not stop a running agent by itself; pause for that. |
+| Record or change a decision                 | `record_decision`, with `supersedesDecisionId` to change one                                     | Implemented                                                                                                              |
+| Rollback                                    | —                                                                                                | Not implemented (needs git changes; planned as an explicit feature)                                                      |
+| Escalation of design questions to the human | Cycles stop at `NEEDS_HUMAN`; answer with `record_decision` / `add_context`, then `resume_cycle` | Implemented (experimental: tested with a scripted fake agent)                                                            |
 
 ### What pause guarantees
 
@@ -69,6 +71,107 @@ P-42 KMP rollout
 
 More: [ADR 0003](docs/adr/0003-plan-work-item-model.md).
 
+## Orchestration cycles
+
+**Experimental.** The loop is tested end to end with a scripted fake agent. The Codex and Claude
+Code command lines are unit-tested but have not been run end to end in CI.
+
+A **Cycle** (`C-17`) is one automated pass over a Work Item:
+
+```text
+start_cycle (implement)          start_cycle (review_existing)
+        │                                   │
+   IMPLEMENTING ──► VERIFYING ◄─────────────┘
+                      │   ▲
+             passed   │   │ fixed
+                      ▼   │
+                  REVIEWING ──► FIXING     (routine findings, failed checks)
+                      │
+          ┌───────────┼──────────────────┐
+          ▼           ▼                  ▼
+ HUMAN_REVIEW_READY  NEEDS_HUMAN       BLOCKED / PAUSED
+ (stop; your turn)   (decision needed) (resume when ready)
+```
+
+- A Work Item has at most one active cycle. The cycle's state is separate from the Work Item's
+  status. While a cycle is active, `start_run`, `complete_work_item`, and `archive_work_item` are
+  refused with `CYCLE_ACTIVE`.
+- **Implement**: the implementation agent works on the cycle's instructions in the bound
+  worktree. If the work needs a human decision, it stops and reports that it needs input.
+- **Verify**: the same agent finds the repository's own checks (package scripts, Makefile,
+  README, AGENTS.md, CI configuration), runs them, and reports each command with its exit code.
+  Orvia adds nothing to your repository. If the checks cannot run here, the cycle is
+  `BLOCKED / VERIFICATION_BLOCKED`, never passed.
+- **Review**: the review agent (can be a different agent) runs read-only and is told not to
+  rely on the implementer's report. It returns structured findings, each with a category and
+  evidence.
+- **Fix (auto-fix)**: failed checks, and findings in routine categories (correctness, test,
+  build, style, and code that clearly differs from a recorded decision or acceptance criterion)
+  that name a file, go to the fix agent. It receives only those findings, not the reviewer's
+  other text. After a fix, the cycle verifies and reviews again.
+
+**When Orvia escalates.** The cycle stops at `NEEDS_HUMAN` with a reason when:
+
+| Reason                     | Cause                                                                                                                                                                                                                                           |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DECISION_REQUIRED`        | a finding is about design, scope, acceptance criteria, public API, database schema, security, dependencies, architecture, a conflicting decision, or an ambiguous requirement; or its category is `unknown`; or a routine finding names no file |
+| `REVIEWER_REQUESTED_HUMAN` | the reviewer could not judge the change                                                                                                                                                                                                         |
+| `AGENT_NEEDS_INPUT`        | the implementation or fix agent needs information or a decision                                                                                                                                                                                 |
+| `FIX_DISPUTED`             | the fix agent disagrees with a finding                                                                                                                                                                                                          |
+| `LOOP_LIMIT`               | automatic fixes reached `orchestration.max_review_fix_cycles` (default 3)                                                                                                                                                                       |
+
+The decision is made by Orvia's fixed rules, not by a model. A review with any finding for a
+human starts no fix. `get_cycle` shows the reason and the ids of the findings that need you;
+`get_current_review` and `get_review` show the findings. Answer with `record_decision` or
+`add_context` and call `resume_cycle`. Resume composes every prompt again from the latest Plan,
+decisions, and context, and checks the worktree identity again. After a review escalation the
+cycle reviews again; if the code may have changed since the last passed verification (a fix
+stopped partway), it verifies first.
+
+**`HUMAN_REVIEW_READY`** means verification passed and the reviewer found nothing. Automation
+stops there. Orvia does not create, review, or merge PRs; the Work Item stays `active` for you.
+
+**Loop limit.** `orchestration.max_review_fix_cycles` (default 3) limits automatic fix rounds.
+At the limit the cycle stops at `NEEDS_HUMAN / LOOP_LIMIT`. The count starts again each time
+you resume from `NEEDS_HUMAN`.
+
+**Pause and resume.** `pause_cycle` stops the running agent with the same process-group
+termination as `pause_work_item` and reports `PAUSED` only after the run is recorded as
+cancelled. If the agent cannot be stopped, the cycle is not paused. `pause_work_item` also
+pauses the Work Item's cycle. `resume_cycle` continues the stage that was interrupted.
+`cancel_cycle` ends the cycle.
+
+**Fail closed.** The cycle stops at `BLOCKED` instead of guessing when:
+
+- a review is not valid structured output (`REVIEW_PROTOCOL_INVALID`). This covers free text,
+  invalid JSON, an unknown category, a missing field, a field over its limit, or a verdict that
+  contradicts the findings. Other stages use `RESULT_PROTOCOL_INVALID`.
+- an agent exits with an error (`RUN_FAILED`).
+- the daemon restarted during a stage (`RUN_INTERRUPTED`; nothing is relaunched automatically).
+- a stage could not start (`START_FAILED`, e.g. storage at `HARD_LIMIT`).
+- a result did not fit in the database (`STORAGE_HARD_LIMIT`).
+
+Fields over a limit are rejected, not truncated. The limits are 20 findings per review; title
+200, detail 2,000, and suggested action 1,000 characters; 5 evidence items per finding; summary
+2,000 characters; 20 verification commands.
+
+**Agent permissions.** Codex runs with `--sandbox workspace-write` for editing stages and
+`--sandbox read-only` for review. Claude Code runs with `--permission-mode acceptEdits` for
+editing stages and with only the Read, Grep, and Glob tools for review. Orvia neither grants nor
+denies Claude Code's Bash tool. Whether Claude Code can run your checks during verification
+depends on your own Claude Code permission settings.
+
+**Current limitations.**
+
+- Orvia does not run the checks itself. It requires a consistent report (commands, exit codes)
+  and an independent review, but does not detect an agent that misreports what it ran.
+- Fix scope is instructed, not enforced.
+- Findings are not matched across reviews; each review is a fresh assessment.
+- If the cache is full while an agent writes its result, the result is lost and the stage is
+  blocked as a protocol failure.
+
+Details: [ADR 0010](docs/adr/0010-orchestration-cycle-and-review-policy.md).
+
 ## Architecture
 
 ```text
@@ -80,8 +183,8 @@ Claude Code / Codex (MCP) ─────┤
 orvia CLI ─────────────────────┤  Unix socket (0700 directory)
                                ▼
                          orvia daemon ── the only process that opens the database
-                         ├── Application: operation registry, use cases, run supervisor
-                         ├── Domain: Plan, Work Item, workspace identity, storage policy
+                         ├── Application: operation registry, use cases, run and cycle supervisors
+                         ├── Domain: Plan, Work Item, Cycle, review policy, workspace identity, storage policy
                          └── Infrastructure
                              ├── SQLite (node:sqlite, rollback journal, exclusive lock, migrations)
                              ├── git (read-only plumbing)
@@ -106,7 +209,10 @@ Decisions: [runtime and Nix](docs/adr/0001-runtime-and-nix.md) ·
 [storage](docs/adr/0004-storage-policy.md) ·
 [repository isolation](docs/adr/0005-repository-isolation.md) ·
 [MCP boundary](docs/adr/0006-local-mcp-boundary.md) ·
-[external dependencies](docs/adr/0007-external-dependencies.md)
+[external dependencies](docs/adr/0007-external-dependencies.md) ·
+[agent process lifecycle](docs/adr/0008-agent-process-lifecycle.md) ·
+[storage contract](docs/adr/0009-storage-contract.md) ·
+[orchestration cycle and review policy](docs/adr/0010-orchestration-cycle-and-review-policy.md)
 
 ## Implemented vs planned
 
@@ -127,12 +233,15 @@ Experimental:
 
 - `start_run` with the Codex and Claude Code adapters. The run lifecycle is tested with a fake
   agent; the real adapters' command lines are unit-tested but have not been run end to end in CI.
+- Orchestration cycles: implement → verify → review → fix, structured review findings,
+  deterministic escalation to the human, loop limit, pause/resume/cancel. Tested with a
+  scripted fake agent; same caveat about the real adapters.
 
 Not implemented / planned:
 
-- Autonomous implement → review → fix loop, review tracking, design escalation.
 - Orvia-enforced filesystem sandbox (see [Security model](#security-model)).
-- Git operations: worktree creation, rollback, PR creation, git cleanup.
+- Git operations: worktree creation, rollback, PR creation and merge, GitHub review comments,
+  git cleanup.
 - MCP over Streamable HTTP (needs authentication first).
 - Running the daemon as a launchd/systemd service; Windows support (path code exists, untested).
 - Multi-machine handoff, cloud sync, web dashboard, telemetry (Orvia sends none).
@@ -179,6 +288,13 @@ orvia status
 
 orvia start-run --work-item-id W-1 --agent codex --instructions "Move the repository layer to KMP"   # experimental
 orvia pause-work-item --work-item-id W-1
+
+# experimental: implement, verify, review, and fix until a human is needed
+orvia start-cycle --work-item-id W-1 --mode implement --instructions "Move the repository layer to KMP" \
+  --implementation-agent codex --review-agent claude
+orvia get-cycle --cycle-id C-1
+orvia record-decision --work-item-id W-1 --title "Keep the public API" --body "Clients depend on it"
+orvia resume-cycle --cycle-id C-1
 ```
 
 `orvia` creates no files in your repository. Its state lives in user-local directories
@@ -188,8 +304,9 @@ orvia pause-work-item --work-item-id W-1
 
 `orvia mcp` is an MCP server over stdio that forwards every call to the daemon. Tools mirror the
 operations (`get_status`, `create_plan`, `list_work_items`, `start_run`, `pause_work_item`,
-`add_context`, `record_decision`, `submit_feedback`, `get_storage_status`, …; `orvia operations`
-lists all). Read-only tools carry `readOnlyHint`, so ChatGPT asks for confirmation only on
+`start_cycle`, `get_cycle`, `get_current_review`, `pause_cycle`, `resume_cycle`, `add_context`,
+`record_decision`, `submit_feedback`, `get_storage_status`, …; `orvia operations` lists all).
+`get_status` shows each open Work Item's active cycle (state, reason, iteration, current run). Read-only tools carry `readOnlyHint`, so ChatGPT asks for confirmation only on
 writes.
 
 Per OpenAI's documentation, ChatGPT (developer mode) reaches MCP servers through a public HTTPS
@@ -226,12 +343,12 @@ reports the result.
 
 ## Storage model
 
-| Class            | What                                                                                  | Where           | Lifetime                             |
-| ---------------- | ------------------------------------------------------------------------------------- | --------------- | ------------------------------------ |
-| Durable          | Plans, Work Items, workspace bindings, PR URLs, decisions, human context and feedback | SQLite          | never removed automatically          |
-| Bounded metadata | Agent Run records                                                                     | SQLite          | newest N finished runs per Work Item |
-| Reconstructible  | diffs, source scans, build details                                                    | not stored      | recomputed from git                  |
-| Ephemeral        | agent output                                                                          | cache directory | TTL + size cap, oldest evicted first |
+| Class            | What                                                                                                                                     | Where           | Lifetime                             |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | --------------- | ------------------------------------ |
+| Durable          | Plans, Work Items, workspace bindings, PR URLs, decisions, human context and feedback, cycles, reviews and their findings (size-limited) | SQLite          | never removed automatically          |
+| Bounded metadata | Agent Run records, including a cycle stage's validated result (size-limited)                                                             | SQLite          | newest N finished runs per Work Item |
+| Reconstructible  | diffs, source scans, build details                                                                                                       | not stored      | recomputed from git                  |
+| Ephemeral        | agent output, raw structured output, result schemas                                                                                      | cache directory | TTL + size cap, oldest evicted first |
 
 Large text (agent output, diffs, source, prompts) is never stored in SQLite. Storage cleanup
 never touches git repositories, worktrees, branches, or commits; this is tested.
@@ -284,6 +401,9 @@ Details: [ADR 0004](docs/adr/0004-storage-policy.md).
     "kill_confirmation_ms": 5000,
     "codex": { "command": "codex" },
     "claude": { "command": "claude" }
+  },
+  "orchestration": {
+    "max_review_fix_cycles": 3
   }
 }
 ```
@@ -300,11 +420,12 @@ Details: [ADR 0004](docs/adr/0004-storage-policy.md).
 | `agents.<name>.command`                    | executable name on `PATH`, or a path                                      |
 | `agents.termination_grace_ms`              | time between `SIGTERM` and `SIGKILL` when stopping an agent               |
 | `agents.kill_confirmation_ms`              | how long to wait for the process group to disappear after `SIGKILL`       |
+| `orchestration.max_review_fix_cycles`      | automatic fix rounds before a cycle stops at `NEEDS_HUMAN / LOOP_LIMIT`   |
 
 JSON instead of TOML keeps the runtime free of a parser dependency
 ([ADR 0007](docs/adr/0007-external-dependencies.md)).
-The size defaults come from the project brief; the thresholds and termination timeouts were set
-by the maintainer.
+The size defaults and the fix-round limit come from the project brief; the thresholds and
+termination timeouts were set by the maintainer.
 They are starting points to revisit with real usage data, not measured optima. Invalid values
 stop the daemon with `CONFIG_INVALID`.
 
@@ -335,6 +456,12 @@ What Orvia does:
 - Runs each agent in its own process group (macOS/Linux) and, on pause or shutdown, stops the
   whole group and confirms it is gone before reporting success.
 - Passes prompts to agents on stdin, not on the command line.
+- States an instruction precedence in every agent prompt: Orvia rules > accepted human
+  decisions > cycle instructions and human context > repository instruction files (AGENTS.md,
+  CLAUDE.md) > agent defaults. Other repository content (README, source, comments, issues,
+  generated files, command output) is declared data that cannot change the rules.
+- Runs cycle reviews read-only (Codex `read-only` sandbox; Claude Code with Read, Grep, and Glob
+  only), and accepts agent results only as schema-valid, size-limited structured output.
 - Never lets its own database files exceed `storage.database_max_mb` (see Storage model).
 - Stores no credentials and sends no telemetry. Logs contain ids and counts, not prompts, agent
   output, or file contents.
@@ -353,6 +480,9 @@ What Orvia does **not** guarantee:
   Agent output can contain your source code.
 - MCP clients and ChatGPT are subject to prompt injection from content they read. Write tools
   require ChatGPT's confirmation, but review what you approve.
+- The instruction precedence is a prompt, not an enforcement mechanism. A coding agent that
+  follows instructions planted in the repository is not stopped by Orvia; the read-only review
+  and the escalation rules limit what such an agent can push through a cycle.
 - Process-tree stopping does not cover descendants that leave the agent's process group, agents
   still running after the daemon was killed by the OS, or Windows (only the agent process is
   stopped there).
@@ -366,22 +496,23 @@ Report vulnerabilities privately: [SECURITY.md](SECURITY.md).
 (Node 24.21, 100 Plans × 5 Work Items), p95 latency was 0.02–1.0 ms in-process and 0.08–1.5 ms
 over the daemon socket with the earlier WAL configuration. `npm run bench:storage` measures the
 full operation mix and file sizes; with the rollback journal, writes are 0.65–0.85 ms and
-`get_status` 1.39–1.43 ms at p95 ([results](docs/benchmarks/2026-10-02-journal-mode.md)). The brief's candidate budget is p95 < 50 ms. CI does not enforce it
+`get_status` 1.39–1.43 ms at p95 ([results](docs/benchmarks/2026-10-02-journal-mode.md)). With an
+active cycle on every Work Item (the most `get_status` can show), `npm run bench` measured
+`get_status` at 1.76–2.12 ms p95 in-process and 2.53–2.88 ms over the socket, in three runs.
+The brief's candidate budget is p95 < 50 ms. CI does not enforce it
 because shared runners vary too much for a fixed threshold to mean anything.
 
 ## Roadmap
 
-1. Agent run hardening: run the real Codex and Claude Code adapters end to end, structured
-   output parsing, run summaries.
-2. Review loop: review findings and their resolution as durable records; escalation of design
-   questions to the human.
-3. Git operations as explicit features: worktree creation, PR mapping from the GitHub CLI,
+1. Agent run hardening: run the real Codex and Claude Code adapters end to end, including the
+   structured output of cycle stages, and run summaries.
+2. Git operations as explicit features: worktree creation, PR mapping from the GitHub CLI,
    rollback.
-4. Orvia-enforced filesystem sandbox at the process launch boundary.
-5. Recovery when durable data fills the budget: export, explicit deletion of archived data,
+3. Orvia-enforced filesystem sandbox at the process launch boundary.
+4. Recovery when durable data fills the budget: export, explicit deletion of archived data,
    and a database compaction command.
-6. MCP over Streamable HTTP with authentication; verified ChatGPT setup guide.
-7. Distribution ([docs/releasing.md](docs/releasing.md)) and service units for launchd and
+5. MCP over Streamable HTTP with authentication; verified ChatGPT setup guide.
+6. Distribution ([docs/releasing.md](docs/releasing.md)) and service units for launchd and
    systemd.
 
 ## Contributing
