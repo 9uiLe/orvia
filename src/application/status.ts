@@ -1,4 +1,5 @@
 import type { Cycle } from '../domain/cycle.ts';
+import type { Checkpoint } from '../domain/checkpoint.ts';
 import type { PlanId, WorkItemId } from '../domain/ids.ts';
 import type { AgentRun } from '../domain/records.ts';
 import type { StorageAssessment } from '../domain/storage.ts';
@@ -17,6 +18,11 @@ export interface OpenWorkItemSummary {
   readonly currentRun: Pick<AgentRun, 'id' | 'profileId' | 'status' | 'startedAt'> | null;
   /** The active orchestration cycle; details (findings, history) via get_cycle. */
   readonly cycle: Pick<Cycle, 'id' | 'state' | 'reason' | 'iteration' | 'currentRunId'> | null;
+  readonly checkpoint:
+    | (Pick<Checkpoint, 'id' | 'state' | 'runStatus' | 'reportError'> & {
+        recordingState: 'recorded' | 'pending' | 'incomplete';
+      })
+    | null;
 }
 
 export interface OverallStatus {
@@ -69,6 +75,7 @@ export async function getStatus(
   const cycles = new Map(store.cycles.listActive().map((cycle) => [cycle.workItemId, cycle]));
   const openWorkItems = store.workItems.list({ statuses: OPEN_STATUSES }).map((item) => {
     const run = running.get(item.id);
+    const checkpoint = store.checkpoints.latestDispatched(item.id);
     return {
       id: item.id,
       planId: item.planId,
@@ -81,6 +88,21 @@ export async function getStatus(
           ? null
           : { id: run.id, profileId: run.profileId, status: run.status, startedAt: run.startedAt },
       cycle: summarizeCycle(cycles.get(item.id)),
+      checkpoint:
+        checkpoint === null
+          ? null
+          : {
+              id: checkpoint.id,
+              state: checkpoint.state,
+              runStatus: checkpoint.runStatus,
+              reportError: checkpoint.reportError,
+              recordingState:
+                checkpoint.state !== 'running'
+                  ? ('recorded' as const)
+                  : run?.id === checkpoint.runId
+                    ? ('pending' as const)
+                    : ('incomplete' as const),
+            },
     };
   });
   return {

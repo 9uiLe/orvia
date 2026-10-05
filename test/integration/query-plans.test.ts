@@ -8,6 +8,14 @@ import { makeTestEnv, type TestEnv } from '../helpers/env.ts';
 import { mkdirSync } from 'node:fs';
 
 const PARAMS: Record<ReadQueryName, SQLInputValue[]> = {
+  getDesignRevision: [1],
+  getLatestDesignRevision: [1],
+  listDesignRevisionsForPlan: [1],
+  getCheckpoint: [1],
+  getLatestDispatchedCheckpoint: [1],
+  listCheckpointsForWorkItem: [1],
+  getCheckpointByRun: [1],
+  listRunningCheckpoints: [],
   getPlan: [1],
   listPlansByStatus: ['active'],
   countPlansByStatus: [],

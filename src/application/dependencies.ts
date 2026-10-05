@@ -21,6 +21,7 @@ export interface Dependencies {
   readonly logger: Logger;
   readonly limits: StorageLimits;
   readonly orchestration: {
+    readonly enableLegacyCycles: boolean;
     readonly maxAutoFixRounds: number;
     /** Used by start_cycle when the request names no profile; never guessed otherwise. */
     readonly defaultImplementationProfile: string | null;

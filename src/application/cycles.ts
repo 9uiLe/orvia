@@ -92,6 +92,8 @@ export class CycleSupervisor {
     reviewProfileId?: string | undefined;
     baseRef?: string | undefined;
   }): Promise<Cycle> {
+    this.#assertLegacyCyclesEnabled();
+    this.#assertNoCheckpoint(input.workItemId);
     const { store, orchestration } = this.#deps;
     const implementationProfileId = this.#chooseProfile(
       input.implementationProfileId,
@@ -232,7 +234,9 @@ export class CycleSupervisor {
    * the latest Plan, decisions, and context, and the workspace identity is validated again.
    */
   async resume(input: { cycleId: CycleId }): Promise<Cycle> {
+    this.#assertLegacyCyclesEnabled();
     const cycle = this.#require(input.cycleId);
+    this.#assertNoCheckpoint(cycle.workItemId);
     const target = resumeTarget(cycle);
     const item = requireWorkItem(this.#deps, cycle.workItemId);
     assertWorkItemCanRun(item);
@@ -362,6 +366,25 @@ export class CycleSupervisor {
     if (isStage(next.state)) {
       const advanced = this.#require(cycle.id);
       if (advanced.state === next.state) await this.#launchOrBlock(advanced, next.state, false);
+    }
+  }
+
+  #assertLegacyCyclesEnabled(): void {
+    if (!this.#deps.orchestration.enableLegacyCycles) {
+      throw new OrviaError(
+        'LEGACY_CYCLES_DISABLED',
+        'automatic cycles are disabled; enable orchestration.enable_legacy_cycles to use them',
+      );
+    }
+  }
+
+  #assertNoCheckpoint(workItemId: WorkItemId): void {
+    if (this.#deps.store.checkpoints.latestDispatched(workItemId) !== null) {
+      throw new OrviaError(
+        'CHECKPOINT_ACTIVE',
+        'this Work Item uses app-led checkpoints; legacy cycles cannot run alongside them',
+        { workItemId },
+      );
     }
   }
 
@@ -506,6 +529,7 @@ export class CycleSupervisor {
    */
   async #launchOrBlock(cycle: Cycle, stage: StageState, rethrow: boolean): Promise<void> {
     try {
+      this.#assertLegacyCyclesEnabled();
       await assertAgentWorkAllowed(this.#runs, this.#storage, 'cycle stage', 'agent_run');
       await this.#launch(cycle, stage);
     } catch (error) {
@@ -553,6 +577,7 @@ export class CycleSupervisor {
       instructions,
       // A pause or cancel may have landed while the launch was being prepared.
       withinTransaction: (run) => {
+        this.#assertNoCheckpoint(cycle.workItemId);
         const fresh = this.#deps.store.cycles.get(cycle.id);
         if (fresh?.state !== stage) {
           throw new OrviaError('INVALID_STATE_TRANSITION', `cycle ${cycle.id} left ${stage}`, {

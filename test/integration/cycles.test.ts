@@ -19,6 +19,7 @@ import type { ProcessLauncher } from '../../src/application/ports.ts';
 import { requiredCapabilitiesFor, type AgentCapability } from '../../src/domain/agent-profile.ts';
 import { OrviaError } from '../../src/domain/errors.ts';
 import type { Cycle, CycleState } from '../../src/domain/cycle.ts';
+import type { Checkpoint } from '../../src/domain/checkpoint.ts';
 import type { Finding, Review } from '../../src/domain/review.ts';
 import type { WorkItem } from '../../src/domain/work-item.ts';
 import type { Daemon } from '../../src/interface/daemon/daemon.ts';
@@ -26,6 +27,7 @@ import {
   call,
   FakeAgent,
   rejectsWith,
+  startPreparedRun,
   startTestDaemon,
   until,
   type FakeStep,
@@ -91,7 +93,10 @@ describe('orchestration cycles', () => {
       agent,
       agents: [reviewer],
       profiles,
-      config: config({ storage, orchestration }),
+      config: config({
+        storage,
+        orchestration: { enable_legacy_cycles: true, ...orchestration },
+      }),
     });
   }
 
@@ -274,7 +279,7 @@ describe('orchestration cycles', () => {
     });
     await rejectsWith(start(), 'CYCLE_ACTIVE');
     await rejectsWith(
-      call(daemon.app, 'start_run', {
+      startPreparedRun(daemon.app, {
         workItemId: item.id,
         profileId: 'primary-profile',
         instructions: 'go',
@@ -452,6 +457,42 @@ describe('orchestration cycles', () => {
       verification: [{ result: { status: 'blocked', summary: 'x', commands: [] } }],
     };
     await settle((await start('review_existing')).id, 'BLOCKED');
+  });
+
+  test('the default configuration rejects starting a cycle before storing it or starting an agent', async () => {
+    await daemon.close();
+    await boot({}, PROFILES, { enable_legacy_cycles: false });
+
+    await rejectsWith(start(), 'LEGACY_CYCLES_DISABLED');
+    await rejectsWith(call(daemon.app, 'get_cycle', { cycleId: 'C-1' }), 'NOT_FOUND');
+    assert.equal(agent.invocations.length, 0);
+    assert.equal(daemon.app.runs.activeRunCount(), 0);
+  });
+
+  test('an opt-out restart preserves cycle inspection and cancellation but rejects resume', async () => {
+    agent.script = { implementation: [{ waitFor: release, ...implemented }] };
+    const cycle = await start();
+    await until(() => agent.invocations.length === 1);
+    await call(daemon.app, 'pause_cycle', { cycleId: cycle.id });
+    await daemon.close();
+
+    agent = new FakeAgent('adapter-a', env.root);
+    reviewer = new FakeAgent('adapter-b', env.root);
+    await boot({}, PROFILES, { enable_legacy_cycles: false });
+
+    const before = await call<CycleDetails>(daemon.app, 'get_cycle', { cycleId: cycle.id });
+    assert.equal(before.cycle.state, 'PAUSED');
+    await rejectsWith(
+      call(daemon.app, 'resume_cycle', { cycleId: cycle.id }),
+      'LEGACY_CYCLES_DISABLED',
+    );
+    assert.deepEqual(
+      await call<CycleDetails>(daemon.app, 'get_cycle', { cycleId: cycle.id }),
+      before,
+    );
+    const cancelled = await call<Cycle>(daemon.app, 'cancel_cycle', { cycleId: cycle.id });
+    assert.equal(cancelled.state, 'CANCELLED');
+    assert.equal(agent.invocations.length, 0);
   });
 
   test('a daemon restart blocks the cycle and starts nothing until a human resumes', async () => {
@@ -754,14 +795,25 @@ describe('orchestration cycles', () => {
     const { control, launcher } = stuckLauncher();
     await daemon.close();
     await boot({}, PROFILES, {}, launcher);
+    await call(daemon.app, 'confirm_design', {
+      planId: item.planId,
+      goal: 'Run the fixture agent.',
+      scope: 'The test Work Item.',
+      constraints: 'The cycle and manual run must not overlap.',
+      acceptanceCriteria: 'A cycle claiming the Work Item prevents manual dispatch.',
+    });
+    const checkpoint = await call<Checkpoint>(daemon.app, 'prepare_prompt', {
+      workItemId: item.id,
+      profileId: 'primary-profile',
+      instructions: 'go',
+      endCondition: 'Finish the fixture invocation.',
+    });
     let open: () => void = () => undefined;
     control.holdNextResolve = new Promise((resolve) => {
       open = resolve;
     });
     const manual = call(daemon.app, 'start_run', {
-      workItemId: item.id,
-      profileId: 'primary-profile',
-      instructions: 'go',
+      checkpointId: checkpoint.id,
     });
     const refused = rejectsWith(manual, 'CYCLE_ACTIVE');
     await until(() => control.held);

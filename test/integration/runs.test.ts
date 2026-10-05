@@ -5,7 +5,14 @@ import { afterEach, beforeEach, describe, test } from 'node:test';
 import type { AgentRun } from '../../src/domain/records.ts';
 import type { WorkItem } from '../../src/domain/work-item.ts';
 import type { Daemon } from '../../src/interface/daemon/daemon.ts';
-import { call, FakeAgent, rejectsWith, startTestDaemon, until } from '../helpers/app.ts';
+import {
+  call,
+  FakeAgent,
+  rejectsWith,
+  startPreparedRun,
+  startTestDaemon,
+  until,
+} from '../helpers/app.ts';
 import { makeTestEnv, silentLogger, type TestEnv } from '../helpers/env.ts';
 import { addWorktree, createRepository } from '../helpers/git.ts';
 
@@ -35,7 +42,7 @@ describe('agent runs', () => {
   });
 
   function start(): Promise<AgentRun> {
-    return call<AgentRun>(daemon.app, 'start_run', {
+    return startPreparedRun(daemon.app, {
       workItemId: item.id,
       profileId: 'fake',
       instructions: 'go',
@@ -149,14 +156,31 @@ describe('agent runs', () => {
     assert.match(prompt, /\[reject\] do not touch the public API/);
   });
 
-  test('an unknown profile is refused before anything is recorded', async () => {
+  test('an unknown profile is refused before a checkpoint or run is recorded', async () => {
+    await call(daemon.app, 'confirm_design', {
+      planId: item.planId,
+      goal: 'Run the fixture agent.',
+      scope: 'The test Work Item.',
+      constraints: 'Use the configured Agent Profile.',
+      acceptanceCriteria: 'Unknown profiles leave no run or checkpoint.',
+    });
     await rejectsWith(
-      call(daemon.app, 'start_run', { workItemId: item.id, profileId: 'nope', instructions: 'go' }),
+      call(daemon.app, 'prepare_prompt', {
+        workItemId: item.id,
+        profileId: 'nope',
+        instructions: 'go',
+        endCondition: 'Finish the fixture invocation.',
+      }),
       'AGENT_PROFILE_NOT_FOUND',
     );
-    const details = await call<{ runs: AgentRun[] }>(daemon.app, 'get_work_item', {
-      workItemId: item.id,
-    });
+    const details = await call<{ runs: AgentRun[]; checkpoints: unknown[] }>(
+      daemon.app,
+      'get_work_item',
+      {
+        workItemId: item.id,
+      },
+    );
     assert.deepEqual(details.runs, []);
+    assert.deepEqual(details.checkpoints, []);
   });
 });

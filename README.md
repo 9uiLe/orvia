@@ -14,9 +14,11 @@ Orvia identifies each Work Item's repository, worktree, and branch, and provides
 for sending instructions and reading work results. The app handles the conversation and
 evaluation; the human decides what to do next.
 
-**Status: pre-release foundation (v0.0.0).** The checkpoint workflow is not implemented in
-full. The current build exposes individual runs and automated cycles. Interfaces and the
-database schema will change; Orvia is not published to a package registry yet.
+**Status: pre-release (v0.0.0).** The current build implements an experimental checkpoint
+workflow: confirmed design revisions, prepared prompts, exact dispatch, durable reports and
+human review. Code, CLI, and MCP protocol checks pass; the full workflow in ChatGPT.app
+or Claude.app remains unverified. Legacy automated cycles require explicit opt-in.
+Interfaces and the database schema will change; Orvia is not published to a package registry yet.
 
 ## Documentation
 
@@ -24,6 +26,8 @@ database schema will change; Orvia is not published to a package registry yet.
   scope, acceptance criteria, and current implementation gaps.
 - [Domain language](CONTEXT.md): definitions of Plans, Work Items, checkpoints, prompts,
   reports, evaluations, and human decisions.
+- [Implementation plan](docs/implementation-plan.md): repair sequence, acceptance checks,
+  and progress toward the specification.
 - [Current implementation guide](docs/current-implementation.md): installation, existing
   commands, configuration, storage behavior, security boundaries, and compatibility results.
 - [Contributing](CONTRIBUTING.md): development checks and change requirements.
@@ -36,7 +40,7 @@ You need macOS or Linux, git, Node.js meeting `package.json`'s engine requiremen
 configured agent CLI on the daemon's PATH. Nix is a development tool, not a runtime requirement.
 Follow the [installation and configuration guide](docs/current-implementation.md#getting-started).
 
-The existing API can execute one agent run in a worktree you have already prepared:
+Prepare a worktree on branch `orvia-try`, then use the standard checkpoint workflow:
 
 ```sh
 orvia daemon                 # keep this running in a separate terminal
@@ -44,14 +48,21 @@ orvia doctor
 orvia create-plan --title "Try Orvia"
 orvia create-work-item --plan-id P-1 --title "First change" --branch orvia-try
 orvia bind-workspace --work-item-id W-1 --worktree-path ~/src/app-try
-orvia start-run --work-item-id W-1 --profile-id primary --instructions "Describe the change"
-orvia get-work-item --work-item-id W-1
+orvia confirm-design --plan-id P-1 --goal "Make the first change" --scope "One small change" --constraints "Use existing dependencies" --acceptance-criteria "Relevant checks pass"
+orvia prepare-prompt --work-item-id W-1 --profile-id primary --instructions "Implement the agreed change" --end-condition "Return a work report when the change and checks are complete"
+orvia get-checkpoint --checkpoint-id K-1   # inspect the full prompt and target
+orvia start-run --checkpoint-id K-1       # after the human instructs sending
+orvia get-checkpoint --checkpoint-id K-1  # read again after the run finishes
+orvia get-checkpoint-changes --checkpoint-id K-1 --max-bytes 20000
 orvia get-run-output --run-id R-1 --max-bytes 20000
+orvia record-checkpoint-review --checkpoint-id K-1 --evaluation "The report and changes meet the design" --action complete --decision "Accept this work"
 ```
 
-`primary` is a configured Agent Profile; the worktree must be on branch `orvia-try`.
-These commands use the current foundation API. They do not provide the planned prompt preview,
-durable manual report, or design-confirmation contract.
+`primary` is a configured Agent Profile with `workspaceRead` and `structuredResult`.
+Inspect results before recording the example evaluation and human decision. `continue` or
+`revise` enables preparing the next checkpoint; `complete` completes the Work Item. Preparation
+starts no CLI, and sending accepts only `checkpointId`. Reports survive normal cache cleanup
+and Run pruning; source and diff content are read from the current worktree.
 
 With the daemon running, a local STDIO MCP client can launch `orvia mcp`. Actual app
 connections still need verification; see [MCP client integration](docs/current-implementation.md#mcp-client-integration).

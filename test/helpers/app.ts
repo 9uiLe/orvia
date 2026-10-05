@@ -13,7 +13,10 @@ import type {
   ProcessLauncher,
 } from '../../src/application/ports.ts';
 import { AGENT_CAPABILITIES, type AgentCapability } from '../../src/domain/agent-profile.ts';
+import type { Checkpoint } from '../../src/domain/checkpoint.ts';
 import { OrviaError } from '../../src/domain/errors.ts';
+import type { WorkItemId } from '../../src/domain/ids.ts';
+import type { AgentRun } from '../../src/domain/records.ts';
 import type { OrviaConfig } from '../../src/infrastructure/config.ts';
 import type { Migration } from '../../src/infrastructure/sqlite/migrator.ts';
 import { startDaemon, type Daemon } from '../../src/interface/daemon/daemon.ts';
@@ -50,6 +53,7 @@ export class FakeAgent implements AgentAdapter {
     granted: readonly AgentCapability[];
   })[] = [];
   mode = 'echo';
+  manualStep: FakeStep | null = null;
   script: Partial<Record<FakeRole, FakeStep[]>> = {};
   readonly #stepDir: string;
 
@@ -70,6 +74,10 @@ export class FakeAgent implements AgentAdapter {
       };
       const file = join(this.#stepDir, `${this.id}-step-${String(this.invocations.length)}.json`);
       writeFileSync(file, JSON.stringify(step));
+      args = [FAKE_AGENT, `step:${file}`];
+    } else if (this.manualStep !== null) {
+      const file = join(this.#stepDir, `${this.id}-manual-${String(this.invocations.length)}.json`);
+      writeFileSync(file, JSON.stringify(this.manualStep));
       args = [FAKE_AGENT, `step:${file}`];
     }
     const invocation = {
@@ -157,4 +165,37 @@ export async function until(condition: () => boolean): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   if (!condition()) throw new Error('condition was not reached');
+}
+
+export async function startPreparedRun(
+  app: Application,
+  input: { workItemId: WorkItemId; profileId: string; instructions: string },
+): Promise<AgentRun> {
+  const item = app.deps.store.workItems.get(input.workItemId);
+  if (item === null) throw new Error(`fixture Work Item ${input.workItemId} was not found`);
+  if (app.deps.store.designRevisions.latest(item.planId) === null) {
+    await call(app, 'confirm_design', {
+      planId: item.planId,
+      goal: 'Exercise the configured agent in the bound workspace.',
+      scope: 'The test Work Item.',
+      constraints: 'Preserve the fixture repository and its workspace identity.',
+      acceptanceCriteria: 'The agent lifecycle satisfies the test assertions.',
+    });
+  }
+  const previous = app.deps.store.checkpoints.latestDispatched(item.id);
+  if (previous?.state === 'awaiting_review') {
+    await call(app, 'record_checkpoint_review', {
+      checkpointId: previous.id,
+      evaluation: 'The fixture run was inspected against its lifecycle assertions.',
+      action: 'continue',
+      decision: 'Continue with the next fixture run.',
+    });
+  }
+  const checkpoint = await call<Checkpoint>(app, 'prepare_prompt', {
+    workItemId: input.workItemId,
+    profileId: input.profileId,
+    instructions: input.instructions,
+    endCondition: 'Finish the requested fixture invocation and report its result.',
+  });
+  return call<AgentRun>(app, 'start_run', { checkpointId: checkpoint.id });
 }

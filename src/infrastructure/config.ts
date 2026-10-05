@@ -47,6 +47,7 @@ const configSchema = z
       .prefault({}),
     orchestration: z
       .strictObject({
+        enable_legacy_cycles: z.boolean().default(false),
         max_review_fix_cycles: z.int().positive().default(3),
         default_implementation_profile: profileId.optional(),
         default_review_profile: profileId.optional(),

@@ -11,7 +11,14 @@ Plans (P-n) are logical changes discussed with the human. Work Items (W-n) are i
 units: one branch, one worktree, one PR. A Plan can have several Work Items.
 Every mutation takes explicit ids. Resolve what the human refers to with list_plans,
 list_work_items, or get_status first; if more than one Work Item could match, ask the human
-instead of guessing. Use get_status to answer "what is happening now?".`;
+instead of guessing. Use get_status to answer "what is happening now?".
+For standard development, confirm_design records the design agreed with the human. prepare_prompt
+returns the exact full instruction and target without starting an agent. Show it in the conversation
+and use start_run with its checkpointId when the human instructs you to send it. After the run,
+read get_checkpoint, get_checkpoint_changes, and get_checkpoint_source; evaluate the result with
+the human and record_checkpoint_review before preparing another prompt. Do not treat a successful
+exit as human acceptance. Legacy cycles are disabled by default and are an explicit compatibility
+workflow, separate from app-led checkpoints.`;
 
 interface ToolAnnotations {
   readonly readOnlyHint: boolean;

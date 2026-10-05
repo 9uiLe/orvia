@@ -4,10 +4,11 @@ This document describes the operations available in the current v0.0.0 build.
 It is an implementation reference, not the product specification or a roadmap.
 [docs/specification.md](specification.md) is the sole source of product requirements.
 
-The current build can launch individual runs and automated implementation/review/fix cycles.
-Design revision approval, prompt preparation and exact dispatch, durable manual work reports,
-and checkpoint-by-checkpoint human judgement are not implemented yet. Commands here do not
-provide those planned guarantees.
+The current build implements the experimental checkpoint workflow: confirm a design, prepare
+and inspect a prompt, send its saved text, inspect the report and changes, then record the app
+evaluation and human decision. Code, CLI, and MCP protocol checks pass. End-to-end use
+in ChatGPT.app or Claude.app remains unverified. Legacy automated implementation/review/fix
+cycles require explicit opt-in and are disabled by default.
 
 ## Getting started
 
@@ -46,7 +47,8 @@ ln -sf "$PWD/dist/interface/cli/main.js" ~/.local/bin/orvia
 ### 2. Configure Agent Profiles
 
 Write `config.json` in the config directory ([where](#files-and-directories)). This example
-uses codex to implement, verify, and fix, and Claude Code to review:
+defines codex for development and Claude Code for review. Cycle profile defaults only apply
+when legacy cycles have been explicitly enabled:
 
 ```json
 {
@@ -63,8 +65,8 @@ uses codex to implement, verify, and fix, and Claude Code to review:
 }
 ```
 
-Without `agents.profiles`, Orvia defines profiles named `codex` and `claude` and no defaults, so
-every `start_cycle` has to name its profiles. All keys: [Configuration](#configuration).
+Without `agents.profiles`, Orvia defines profiles named `codex` and `claude` and no cycle profile
+defaults. All keys: [Configuration](#configuration).
 
 ### 3. Start the daemon
 
@@ -81,8 +83,10 @@ orvia list-agent-profiles    # which profiles can run which stages
 
 `orvia doctor` exits with a non-zero status when a check fails. The daemon reads `config.json`
 only when it starts: after editing it, stop the daemon (Ctrl-C) and start it again. Stopping the
-daemon stops the agents it runs; a cycle that was running a stage is then
-`BLOCKED / RUN_INTERRUPTED` and continues with `resume-cycle`.
+daemon stops the agents it runs. An unfinished checkpoint returns to human review with an
+interrupted run or missing-report error; it is never automatically resent. A legacy cycle that was running a stage is then
+`BLOCKED / RUN_INTERRUPTED`. It stays stopped until an explicit `resume-cycle`, which also
+requires legacy cycles to be enabled.
 
 ### 4. Prepare a worktree
 
@@ -97,26 +101,38 @@ Agents change files in that worktree. Orvia itself writes nothing into the repos
 `orvia discover-worktrees --repository-path ~/src/app` lists a repository's worktrees and the
 Work Items bound to them.
 
-### 5. Run a first cycle
+### 5. Run and review a checkpoint
 
 ```sh
 orvia create-plan --title "Try Orvia"
 orvia create-work-item --plan-id P-1 --title "First change" --branch orvia-try
 orvia bind-workspace --work-item-id W-1 --worktree-path ~/src/app-try
-orvia start-cycle --work-item-id W-1 --mode implement --instructions "Describe the change"
-orvia get-cycle --cycle-id C-1          # state, reason, and the findings that need you
+orvia confirm-design --plan-id P-1 --goal "Make the first change" --scope "One small change" --constraints "Use existing dependencies" --acceptance-criteria "Relevant checks pass"
+orvia prepare-prompt --work-item-id W-1 --profile-id primary --instructions "Implement the agreed change" --end-condition "Return a work report when the change and checks are complete"
+orvia get-checkpoint --checkpoint-id K-1   # inspect the full prompt, design, Profile and target
+orvia start-run --checkpoint-id K-1       # after the human instructs sending
+orvia get-work-item --work-item-id W-1    # observe the run and checkpoint
+orvia get-checkpoint --checkpoint-id K-1  # read the report after the run finishes
+orvia get-checkpoint-changes --checkpoint-id K-1 --max-bytes 20000
+orvia get-run-output --run-id R-1 --max-bytes 20000
 ```
 
-- `HUMAN_REVIEW_READY`: verification passed and the review found nothing. The change is in the
-  worktree for you; Orvia does not commit, open, or merge PRs.
-- `NEEDS_HUMAN`: answer with `orvia record-decision --work-item-id W-1 --title … --body …` or
-  `orvia add-context --work-item-id W-1 --body …`, then `orvia resume-cycle --cycle-id C-1`.
-- `BLOCKED`: the reason says what failed. Fix it, then `orvia resume-cycle --cycle-id C-1`.
-- `orvia pause-cycle --cycle-id C-1` stops the agent; `orvia cancel-cycle --cycle-id C-1` ends
-  the cycle.
+The IDs above assume a fresh instance; use the IDs returned by each command. Preparation
+starts no CLI. `start_run` accepts only `{ checkpointId }`; the old Work Item/Profile/free-text
+request is rejected. The saved prompt is passed unchanged on stdin to a new agent process.
 
-What each state and reason means: [Orchestration cycles](#orchestration-cycles). To run a single
-agent without a cycle: `orvia start-run --work-item-id W-1 --profile-id primary --instructions …`.
+After inspecting the report and evidence, record the app evaluation and the human's actual
+decision, for example:
+
+```sh
+orvia record-checkpoint-review --checkpoint-id K-1 --evaluation "The implementation meets the design; the next step remains" --action continue --decision "Continue with the next step"
+orvia prepare-prompt --work-item-id W-1 --profile-id primary --instructions "Implement the next agreed step" --end-condition "Return a report when the step and checks are complete"
+```
+
+`continue` or `revise` permits a new preparation with the previous report, evaluation and
+decision. `complete` records acceptance and completes the Work Item. A successful CLI exit
+alone does neither. Orvia does not start another run automatically, commit, open, or merge
+PRs. For the optional automated workflow, see [Orchestration cycles](#orchestration-cycles).
 
 ### 6. Connect an MCP client (optional)
 
@@ -128,7 +144,9 @@ and verification status: [MCP client integration](#mcp-client-integration).
 
 To update, pull, run `npm ci && npm run build`, and restart the daemon. Pending database
 migrations run when the daemon starts, after a backup; a build older than the database refuses
-to open it.
+to open it. The current schema version is 3: migration 0003 adds design revisions and
+checkpoints. Legacy Plans and runs are preserved without being treated as confirmed designs
+or inspected checkpoint prompts.
 
 To start over, stop the daemon and delete `state.db*` and `backups/` in the data directory and
 the cache directory ([where](#files-and-directories)). On macOS the data directory is also the
@@ -156,12 +174,15 @@ P-42 KMP rollout
 
 ### Human controls
 
-The current implementation provides the following controls. Its automated cycles can continue
-across runs; the checkpoint workflow required by the product specification is not implemented:
+The standard workflow waits for an app evaluation and human decision after each checkpoint.
+Legacy cycles have their own explicit compatibility controls:
 
 | Action                                      | How                                                                                              | Status                                                                                                                   |
 | ------------------------------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
-| Observe                                     | `get_status`, `get_plan`, `get_work_item`, `get_run_output`                                      | Implemented                                                                                                              |
+| Observe                                     | `get_status`, `get_plan`, `get_work_item`, `get_checkpoint`, `get_run_output`                    | Implemented                                                                                                              |
+| Confirm, prepare and send                   | `confirm_design`, `prepare_prompt`, `start_run`                                                  | Experimental checkpoint workflow; inspect the stored prompt before sending.                                              |
+| Read changes and source                     | `get_checkpoint_changes`, `get_checkpoint_source`                                                | Current Git/worktree evidence with fingerprint and completeness.                                                         |
+| Evaluate and decide                         | `record_checkpoint_review`                                                                       | Records the app evaluation and human decision; enables continuation or completes the Work Item.                          |
 | Pause / resume                              | `pause_work_item`, `resume_work_item`                                                            | Implemented. Pause returns only after the agent and the processes it started have stopped (macOS/Linux; see below).      |
 | Pause / resume a cycle                      | `pause_cycle`, `resume_cycle`, `cancel_cycle`                                                    | Implemented with the same process guarantee as Work Item pause (see [Orchestration cycles](#orchestration-cycles)).      |
 | Add context                                 | `add_context` (Plan or Work Item)                                                                | Implemented                                                                                                              |
@@ -169,6 +190,90 @@ across runs; the checkpoint workflow required by the product specification is no
 | Record or change a decision                 | `record_decision`, with `supersedesDecisionId` to change one                                     | Implemented                                                                                                              |
 | Rollback                                    | —                                                                                                | Not implemented (requires explicit git operations)                                                                       |
 | Escalation of design questions to the human | Cycles stop at `NEEDS_HUMAN`; answer with `record_decision` / `add_context`, then `resume_cycle` | Implemented (experimental; see [Compatibility](#compatibility))                                                          |
+
+### Checkpoint reports and review evidence
+
+`confirm_design` appends an immutable Plan design revision (`S-n`), with `goal`, `scope`,
+`constraints` and `acceptanceCriteria`; `get_plan` returns revision history. `prepare_prompt`
+creates a checkpoint (`K-n`) containing `workItemId`, `profileId`, `instructions`,
+`endCondition`, the selected design, bound workspace, saved `prompt` and code fingerprint.
+It requires a confirmed design and, after a dispatched checkpoint, a recorded evaluation and
+accepted human decision. A checkpoint Profile must provide `workspaceRead` and
+`structuredResult`; it uses the Profile's effective capabilities for its work.
+
+Checkpoint states are `prepared` → `running` → `awaiting_review` → `reviewed`. An unsent
+prompt can be marked `discarded` with `discard_prompt` while its text remains readable.
+Before sending, Orvia rechecks the design, decisions, evaluation, notes, Work Item, Profile,
+workspace identity and code state. Changes require preparing again (`PROMPT_STALE`), and
+workspace mismatches are refused (`WORKSPACE_MISMATCH`). Repeating a consumed checkpoint
+does not create a second run, including after its Run metadata has been pruned.
+An active legacy cycle blocks checkpoint preparation; a Work Item with dispatched checkpoints
+cannot start a legacy cycle.
+
+`get_checkpoint` returns the durable checkpoint, its design, available Run metadata, review
+decisions, `verificationSource: "agent_reported"`, and `changedFiles`. That file list compares
+the checkpoint's prepared and recorded end fingerprints; it is `null` if end evidence could
+not be collected. Run metadata may be `null` after normal pruning while the report and saved
+prompt remain available.
+
+A manual work report has this shape:
+
+```json
+{
+  "status": "completed",
+  "summary": "What changed",
+  "commands": [{ "command": "npm test", "exitCode": 0, "summary": "Reported check result" }],
+  "unresolved": "",
+  "requiredDecision": "Accept or request another checkpoint"
+}
+```
+
+`status` is `completed` or `needs_input`. Command results are the agent's statements; Orvia
+does not run or attest those checks. Existing result limits apply: summary and unresolved
+text up to 2,000 characters, requiredDecision up to 1,000, up to 20 commands, each command
+and its summary up to 500 characters. Invalid or oversized output is rejected without
+truncating a report. `reportError` records nonzero/cancelled/interrupted runs, malformed,
+oversized or missing output, unavailable code state, or report storage exhaustion. A failure
+does not create a successful replacement report or start a new run.
+
+`get_checkpoint` also returns `recordingState`: `pending` while the run/report is being
+recorded, `recorded` after persistence, or `incomplete` when the run ended but the checkpoint
+could not be updated. Incomplete recording blocks the next preparation; restart can recover
+the checkpoint with an explicit missing-report cause. Daemon shutdown waits for report persistence.
+
+`get_run_output` returns `output`, `availability` (`available`, `expired` or `unavailable`)
+and `truncated`. Logs remain cache data: expiry or cache removal does not remove the durable
+checkpoint report. The caller's `maxBytes` and the run's output cap can both make a log partial.
+
+`get_checkpoint_changes` returns `baseCommit`, `head`, `fingerprint`, `observedAt`,
+`files` (`path`, `status`), `diff`, `complete`, `checkpointId` and `matchesReport`.
+The baseline is the HEAD recorded at the Work Item's first checkpoint preparation and is
+carried through subsequent checkpoints. The result is cumulative current worktree evidence,
+including a separate staged diff against HEAD. Renames in the file list are represented by
+delete/add entries. `matchesReport` is `false` when current code differs from the recorded
+end state, and `null` if no end state is available. It does not return a historical diff.
+
+The code fingerprint includes HEAD, index entries, tracked contents, and all nonignored
+untracked contents, including binary data, mode changes and symlink target names. Collection
+checks for concurrent changes and fails with `STALE_CODE_STATE`; incomplete Git listings
+cannot produce a complete fingerprint. Submodule snapshots are explicitly unsupported.
+
+`maxBytes` bounds the returned file-list/diff content. `complete: false` means some evidence
+is omitted, for example a large result or binary content; request a larger result or read the
+listed source files. Source pages use byte offsets and currently always encode `content` as
+base64, including text. They return `totalBytes`, `nextOffset`, `encoding`, `head`,
+`fingerprint`, `observedAt`, `checkpointId`, `matchesReport` and `complete`. A page is complete only when it covers the whole
+file from offset zero. Use the returned `nextOffset` and the same `expectedFingerprint` for
+each subsequent page; changed code is rejected rather than combined across pages:
+
+```sh
+orvia get-checkpoint-source --checkpoint-id K-1 --path src/example.ts --offset 0 --max-bytes 20000 --expected-fingerprint "fingerprint from get-checkpoint-changes"
+```
+
+Source reads cover tracked and nonignored untracked regular files within the bound worktree.
+Deleted or unobserved files return `NOT_FOUND`; external paths, traversal, Git administrative
+directories and unsupported file kinds are refused. Symlinks may resolve only to observed
+files inside that worktree. Full source and diff content are not persisted.
 
 #### What pause guarantees
 
@@ -183,7 +288,31 @@ On Windows only the agent process itself is stopped.
 
 ### Orchestration cycles
 
-**Experimental.** The loop is tested end to end with scripted fake adapters, and was run locally
+**Legacy compatibility feature; disabled by default.** `start_cycle` and `resume_cycle` return
+`LEGACY_CYCLES_DISABLED` unless the daemon configuration explicitly sets:
+
+```json
+{
+  "orchestration": {
+    "enable_legacy_cycles": true
+  }
+}
+```
+
+Merge this setting with your existing config and restart the daemon. Profile defaults alone
+do not enable cycles. `list_agent_profiles` reports `legacyCyclesEnabled` for the running daemon.
+Disabling cycles leaves `get_cycle`, review retrieval, `pause_cycle`, and `cancel_cycle` available.
+An existing active cycle still reserves its Work Item; cancel it to prepare a checkpoint.
+Legacy cycles cannot be started on a Work Item that already has a dispatched checkpoint.
+
+With legacy cycles enabled and profile defaults configured:
+
+```sh
+orvia start-cycle --work-item-id W-1 --mode implement --instructions "Describe the change"
+orvia get-cycle --cycle-id C-1
+```
+
+The loop is tested end to end with scripted fake adapters, and was run locally
 with real agent CLIs ([Compatibility](#compatibility)); CI does not run real agents.
 
 A **Cycle** (`C-17`) is one automated pass over a Work Item:
@@ -308,7 +437,9 @@ Fields over a limit are rejected, not truncated. The limits are 20 findings per 
 
 A profile's capabilities are those its adapter provides, narrowed by the profile's optional
 `capabilities` list; configuration cannot add one the adapter lacks. Each run is granted only
-what its stage requires, so a review cannot edit.
+what its cycle stage requires, so a legacy cycle review cannot edit. A standard checkpoint
+uses its selected Profile's effective capabilities and requires `workspaceRead` plus
+`structuredResult`.
 
 ```json
 {
@@ -369,11 +500,14 @@ reports the result.
 
 `orvia mcp` is an MCP server over stdio that forwards every call to the daemon. Any MCP client
 that can launch a stdio server can use it; the CLI calls the same operations. Tools mirror the
-operations (`get_status`, `create_plan`, `list_work_items`, `list_agent_profiles`, `start_run`,
+operations (`get_status`, `create_plan`, `list_work_items`, `list_agent_profiles`,
+`confirm_design`, `prepare_prompt`, `get_checkpoint`, `start_run`, `record_checkpoint_review`,
+`get_checkpoint_changes`, `get_checkpoint_source`,
 `pause_work_item`, `start_cycle`, `get_cycle`, `get_current_review`, `pause_cycle`,
 `resume_cycle`, `add_context`, `record_decision`, `submit_feedback`, `get_storage_status`, …;
-`orvia operations` lists all). `get_status` shows each open Work Item's active cycle (state,
-reason, iteration, current run). Read-only tools carry `readOnlyHint`, so clients that honor it
+`orvia operations` lists all). `get_status` shows each open Work Item's latest checkpoint
+(state, run status, report error) and active cycle (state, reason, iteration, current run).
+Read-only tools carry `readOnlyHint`, so clients that honor it
 ask for confirmation only on writes.
 
 Clients that launch a stdio server directly (untested examples): `claude mcp add orvia -- orvia
@@ -438,6 +572,7 @@ daemon and every command that talks to it.
     }
   },
   "orchestration": {
+    "enable_legacy_cycles": false,
     "max_review_fix_cycles": 3,
     "max_review_diff_kb": 256
   }
@@ -458,6 +593,7 @@ daemon and every command that talks to it.
 | `agents.profiles.<id>.capabilities`            | optional list that narrows the adapter's capabilities                                                                       |
 | `agents.termination_grace_ms`                  | time between `SIGTERM` and `SIGKILL` when stopping an agent                                                                 |
 | `agents.kill_confirmation_ms`                  | how long to wait after `SIGKILL` for the process group to disappear, and after an agent exits for its output pipes to close |
+| `orchestration.enable_legacy_cycles`           | explicitly enable legacy automatic cycles; default false; required for start and resume                                     |
 | `orchestration.max_review_fix_cycles`          | automatic fix rounds before a cycle stops at `NEEDS_HUMAN / LOOP_LIMIT`                                                     |
 | `orchestration.default_implementation_profile` | profile `start_cycle` uses when the request names none (no default)                                                         |
 | `orchestration.default_review_profile`         | the same for reviews (no default)                                                                                           |
@@ -472,15 +608,18 @@ it is rolled back and the daemon refuses to start with `MIGRATION_STORAGE_REQUIR
 
 ## Storage model
 
-| Class            | What                                                                                                                                     | Where           | Lifetime                             |
-| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | --------------- | ------------------------------------ |
-| Durable          | Plans, Work Items, workspace bindings, PR URLs, decisions, human context and feedback, cycles, reviews and their findings (size-limited) | SQLite          | never removed automatically          |
-| Bounded metadata | Agent Run records, including a cycle stage's validated result (size-limited)                                                             | SQLite          | newest N finished runs per Work Item |
-| Reconstructible  | diffs, source scans, build details                                                                                                       | not stored      | recomputed from git                  |
-| Ephemeral        | agent output, raw structured output, result schemas                                                                                      | cache directory | TTL + size cap, oldest evicted first |
+| Class            | What                                                                                                                                                                                             | Where           | Lifetime                             |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------- | ------------------------------------ |
+| Durable          | Plans, Work Items, workspace bindings, PR URLs, design revisions, checkpoint prompts, code fingerprints, work reports, evaluations and decisions, context/feedback, cycles, reviews and findings | SQLite          | never removed automatically          |
+| Bounded metadata | Agent Run records, including a cycle stage's validated result (size-limited)                                                                                                                     | SQLite          | newest N finished runs per Work Item |
+| Reconstructible  | diffs, source scans, build details                                                                                                                                                               | not stored      | recomputed from git                  |
+| Ephemeral        | agent output, raw structured output, result schemas                                                                                                                                              | cache directory | TTL + size cap, oldest evicted first |
 
-Large text (agent output, diffs, source, prompts) is never stored in SQLite. Storage cleanup
-never touches git repositories, worktrees, branches, or commits; this is tested.
+Agent output, diffs and source content are not stored in SQLite. Prepared prompt text and
+validated work reports are durable exceptions: they are subject to the same database hard
+budget, with failed writes rolled back. Normal Run pruning can clear a checkpoint's `runId`
+without removing its saved prompt, report, run status or review history. Storage cleanup never
+touches git repositories, worktrees, branches, or commits; this is tested.
 
 **`database_max_mb` is a hard budget.** It covers `state.db`, its rollback journal, any WAL or SHM
 left by an older build, and every migration backup. Orvia's database operations never take
@@ -503,7 +642,7 @@ its journal, a new backup, existing backups, and the control reserve all fit in
 practice a migration needs about three times the database size within the budget.
 
 **When durable data fills the budget.** Cleanup only removes run records, cache, and expired
-backups; it never deletes Plans, Work Items, decisions, or notes. Archiving changes a status and
+backups; it never deletes Plans, Work Items, design revisions, checkpoints, decisions, or notes. Archiving changes a status and
 frees almost no space. If durable data alone reaches the write capacity (`HARD_LIMIT`), the only
 remedy today is to raise `storage.database_max_mb`. Export and explicit deletion of archived
 durable records are not implemented.
@@ -535,6 +674,8 @@ What Orvia does:
 - Runs each agent in its own process group (macOS/Linux) and, on pause or shutdown, stops the
   whole group and confirms it is gone before reporting success.
 - Passes prompts to agents on stdin, not on the command line.
+- Sends the inspected checkpoint prompt unchanged and refuses stale context or code. Current
+  source reads stay inside the bound worktree and reject external symlinks and Git metadata.
 - States an instruction precedence in every agent prompt: Orvia rules > accepted human
   decisions > cycle instructions and human context > repository instruction files (AGENTS.md,
   CLAUDE.md) > agent defaults. Other repository content (README, source, comments, issues,
@@ -575,7 +716,7 @@ Report vulnerabilities privately: [SECURITY.md](../SECURITY.md).
 
 Bundled adapters are compatibility implementations, not requirements. Results below are from
 local runs on macOS (2026-10-02) in a throwaway repository; CI runs only the scripted fake
-adapters.
+adapters. These runs exercised legacy cycles, not the new standard checkpoint workflow.
 
 | Adapter  | CLI version         | Capabilities declared                                             | Implement        | Verify                        | Review | Full cycle                                                               |
 | -------- | ------------------- | ----------------------------------------------------------------- | ---------------- | ----------------------------- | ------ | ------------------------------------------------------------------------ |
@@ -621,7 +762,11 @@ Implemented (covered by tests):
 
 Experimental:
 
-- `start_run` and orchestration cycles: implement → verify → review → fix, structured review
+- Standard checkpoint operations: confirmed designs, prepared prompt preview and exact
+  `start_run({ checkpointId })`, durable reports, human evaluation/decisions, and public Git
+  changes/source evidence. All 292 tests and code, CLI, and MCP protocol checks pass; desktop-app use and
+  the new full checkpoint workflow with real agents have not been verified.
+- Opt-in legacy orchestration cycles: implement → verify → review → fix, structured review
   findings with Orvia-collected git evidence, deterministic escalation to the human, loop limit,
   pause/resume/cancel. Tested with scripted fake adapters in CI and run locally with real agent
   CLIs ([Compatibility](#compatibility)).
@@ -668,8 +813,8 @@ MCP clients ───────────────────┐
 orvia CLI ─────────────────────┤  Unix socket (0700 directory)
                                ▼
                          orvia daemon ── the only process that opens the database
-                         ├── Application: operation registry, use cases, run and cycle supervisors
-                         ├── Domain: Plan, Work Item, Cycle, review policy, agent capabilities, workspace identity, storage policy
+                         ├── Application: operation registry, use cases, checkpoint/run/cycle supervisors
+                         ├── Domain: Plan, Work Item, Design Revision, Checkpoint, Work Report, Cycle, review policy, agent capabilities, workspace identity, storage policy
                          └── Infrastructure
                              ├── SQLite (node:sqlite, rollback journal, exclusive lock, migrations)
                              ├── git (read-only plumbing, review evidence)

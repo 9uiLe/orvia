@@ -68,6 +68,23 @@ export function requireProfile(
   return profile;
 }
 
+export function assertCheckpointProfile(profile: AgentProfile): void {
+  const required: readonly AgentCapability[] = ['workspaceRead', 'structuredResult'];
+  const missing = missingCapabilities(required, profile.capabilities);
+  if (missing.length > 0) {
+    throw new OrviaError(
+      'AGENT_CAPABILITY_MISMATCH',
+      'checkpoint profile lacks required capabilities',
+      {
+        profileId: profile.id,
+        required,
+        missing,
+        available: profile.capabilities,
+      },
+    );
+  }
+}
+
 /** Refuses before anything is started when the profile lacks what the stage needs. */
 export function assertCapable(profile: AgentProfile, stage: StageState): void {
   const required = requiredCapabilitiesFor(stage);

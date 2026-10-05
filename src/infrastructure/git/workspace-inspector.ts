@@ -3,6 +3,12 @@ import type { ChangeEvidence, GitInspector, WorktreeEntry } from '../../applicat
 import { OrviaError } from '../../domain/errors.ts';
 import type { ObservedWorkspace } from '../../domain/workspace.ts';
 import type { GitCli } from './git-cli.ts';
+import { RepositoryEvidence } from './repository-evidence.ts';
+import type {
+  CodeSnapshot,
+  SourcePage,
+  WorkspaceChanges,
+} from '../../domain/repository-evidence.ts';
 
 const BRANCH_PREFIX = 'refs/heads/';
 
@@ -26,6 +32,40 @@ export class GitWorkspaceInspector implements GitInspector {
 
   constructor(git: GitCli) {
     this.#git = git;
+  }
+
+  snapshot(worktreeRoot: string): Promise<CodeSnapshot> {
+    return new RepositoryEvidence(this.#git).snapshot(worktreeRoot);
+  }
+
+  readChanges(
+    worktreeRoot: string,
+    baseCommit: string,
+    maxBytes: number,
+    expectedFingerprint?: string,
+  ): Promise<WorkspaceChanges> {
+    return new RepositoryEvidence(this.#git).readChanges(
+      worktreeRoot,
+      baseCommit,
+      maxBytes,
+      expectedFingerprint,
+    );
+  }
+
+  readSource(
+    worktreeRoot: string,
+    path: string,
+    offset: number,
+    maxBytes: number,
+    expectedFingerprint?: string,
+  ): Promise<SourcePage> {
+    return new RepositoryEvidence(this.#git).readSource(
+      worktreeRoot,
+      path,
+      offset,
+      maxBytes,
+      expectedFingerprint,
+    );
   }
 
   async observe(path: string): Promise<ObservedWorkspace | null> {

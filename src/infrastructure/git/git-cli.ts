@@ -26,7 +26,7 @@ export class GitCli {
         ['-C', cwd, ...args],
         {
           encoding: 'utf8',
-          ...(maxBytes === undefined ? {} : { maxBuffer: maxBytes }),
+          maxBuffer: maxBytes ?? Infinity,
           // Keep read-only commands from refreshing the index or taking optional locks.
           env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', LC_ALL: 'C' },
           windowsHide: true,
