@@ -3,7 +3,8 @@ import { rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'node:test';
 import { RESULT_LIMITS } from '../../src/application/agent-results.ts';
-import type { Checkpoint, WorkReport } from '../../src/domain/checkpoint.ts';
+import type { WorkReport } from '../../src/domain/checkpoint.ts';
+import type { CheckpointView as Checkpoint } from '../../src/application/checkpoint-view.ts';
 import type { AgentRun } from '../../src/domain/records.ts';
 import type { WorkItem } from '../../src/domain/work-item.ts';
 import type { Daemon } from '../../src/interface/daemon/daemon.ts';
@@ -152,6 +153,30 @@ describe('app-led checkpoints', () => {
     await finish(next);
     await review(next, 'complete');
     assert.equal(daemon.app.deps.store.workItems.get(item.id)?.status, 'completed');
+  });
+
+  test('read-only investigation prompts state their limits and preserve the full report separately from its summary', async () => {
+    await daemon.close();
+    daemon = await startTestDaemon(env, {
+      agent,
+      clock,
+      profiles: { fake: { adapter: 'fake', capabilities: ['workspaceRead', 'structuredResult'] } },
+    });
+    await confirm();
+    const checkpoint = await prepare();
+    assert.match(checkpoint.prompt, /Do not write files/);
+    assert.match(checkpoint.prompt, /Command execution is not granted/);
+    assert.match(checkpoint.prompt, /content/);
+    const content = '# Investigation\n' + 'Source evidence and OS comparison.\n'.repeat(100);
+    const report = { ...REPORT, summary: 'Investigation complete.', content, commands: [] };
+    agent.manualStep = { result: report };
+    await finish(checkpoint);
+    const detail = await call<{ checkpoint: Checkpoint }>(daemon.app, 'get_checkpoint', {
+      checkpointId: checkpoint.id,
+    });
+    assert.equal(detail.checkpoint.reportError, null);
+    assert.deepEqual(detail.checkpoint.report, report);
+    assert.equal(daemon.app.deps.store.checkpoints.get(checkpoint.id)?.report?.content, content);
   });
 
   test('a paused Work Item can be evaluated without enabling another run and can be explicitly completed', async () => {

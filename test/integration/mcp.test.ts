@@ -8,9 +8,14 @@ import { createInterface } from 'node:readline';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { OPERATIONS } from '../../src/application/operations.ts';
-import type { Checkpoint, DesignRevision, WorkReport } from '../../src/domain/checkpoint.ts';
+import type { CheckpointView } from '../../src/application/checkpoint-view.ts';
+import type { DesignRevision, WorkReport } from '../../src/domain/checkpoint.ts';
 import type { AgentRun, Decision } from '../../src/domain/records.ts';
-import type { SourcePage, WorkspaceChanges } from '../../src/domain/repository-evidence.ts';
+import type {
+  CodeSnapshot,
+  SourcePage,
+  WorkspaceChanges,
+} from '../../src/domain/repository-evidence.ts';
 import type { WorkItem } from '../../src/domain/work-item.ts';
 import type { Daemon } from '../../src/interface/daemon/daemon.ts';
 import { FakeAgent, startTestDaemon } from '../helpers/app.ts';
@@ -198,7 +203,7 @@ describe('MCP server over stdio', () => {
         constraints: 'Preserve workspace identity.',
         acceptanceCriteria: 'The report and source can be inspected before a human decision.',
       });
-      const prepared = await invoke<Checkpoint>('prepare_prompt', input);
+      const prepared = await invoke<CheckpointView>('prepare_prompt', input);
       assert.equal(prepared.state, 'prepared');
       assert.equal(prepared.designRevisionId, design.id);
       assert.equal(prepared.profileId, 'fake');
@@ -218,7 +223,7 @@ describe('MCP server over stdio', () => {
       writeFileSync(release, '');
       await daemon.app.runs.waitForRun(run.id);
       const inspected = await invoke<{
-        checkpoint: Checkpoint;
+        checkpoint: CheckpointView;
         design: DesignRevision;
         run: AgentRun;
         verificationSource: string;
@@ -272,14 +277,14 @@ describe('MCP server over stdio', () => {
 
       const evaluation = 'The app inspected the source and the agent-reported commands.';
       const decision = 'Continue with a second checkpoint to finish the agreed change.';
-      const reviewed = await invoke<Checkpoint>('record_checkpoint_review', {
+      const reviewed = await invoke<CheckpointView>('record_checkpoint_review', {
         checkpointId: prepared.id,
         evaluation,
         action: 'continue',
         decision,
       });
       assert.equal(reviewed.state, 'reviewed');
-      const next = await invoke<Checkpoint>('prepare_prompt', {
+      const next = await invoke<CheckpointView>('prepare_prompt', {
         ...input,
         instructions: 'Finish the change.',
       });
@@ -291,19 +296,19 @@ describe('MCP server over stdio', () => {
       const nextRun = await invoke<AgentRun>('start_run', { checkpointId: next.id });
       assert.equal(agent.invocations[1]?.stdin, next.prompt);
       await daemon.app.runs.waitForRun(nextRun.id);
-      const secondReport = await invoke<{ checkpoint: Checkpoint }>('get_checkpoint', {
+      const secondReport = await invoke<{ checkpoint: CheckpointView }>('get_checkpoint', {
         checkpointId: next.id,
       });
       assert.equal(secondReport.checkpoint.state, 'awaiting_review');
       assert.deepEqual(secondReport.checkpoint.report, report);
-      const complete = await invoke<Checkpoint>('record_checkpoint_review', {
+      const complete = await invoke<CheckpointView>('record_checkpoint_review', {
         checkpointId: next.id,
         evaluation: 'The app accepts the finished scope after inspecting the second report.',
         action: 'complete',
         decision: 'The human accepts the change and completes this Work Item.',
       });
       assert.equal(complete.reviews.at(-1)?.action, 'complete');
-      const final = await invoke<{ workItem: WorkItem; checkpoints: Checkpoint[] }>(
+      const final = await invoke<{ workItem: WorkItem; checkpoints: CheckpointView[] }>(
         'get_work_item',
         { workItemId: item.id },
       );
@@ -321,6 +326,140 @@ describe('MCP server over stdio', () => {
       );
     } finally {
       writeFileSync(release, '');
+      await client.close();
+    }
+  });
+
+  test('large repository checkpoints stay inspectable over MCP without exposing validation records', async (t) => {
+    assert.ok(daemon);
+    const app = daemon.app;
+    const repo = createRepository(join(env.root, 'large-checkpoint-repo'));
+    const actual = await app.deps.git.snapshot(repo);
+    const files = Array.from({ length: 13_954 }, (_, index) => ({
+      path: `shared/src/commonMain/kotlin/survey/component-${String(index)}.kt`,
+      fingerprint: 'a'.repeat(64),
+    }));
+    let snapshot: CodeSnapshot = { ...actual, files };
+    t.mock.method(app.deps.git, 'snapshot', () => Promise.resolve(snapshot));
+    const client = new Client({ name: 'orvia-large-checkpoint-test', version: '0.0.0' });
+    await client.connect(new StdioClientTransport(serverParams()));
+    const invoke = async <T>(name: string, input: Record<string, unknown>): Promise<T> => {
+      const result = (await client.callTool({ name, arguments: input })) as ToolResult;
+      assert.equal(result.isError, undefined, name);
+      assert.ok(result.structuredContent, name);
+      const bytes = Buffer.byteLength(JSON.stringify(result));
+      assert.ok(
+        bytes < 1_000_000,
+        `${name}: ${String(bytes)} bytes exceeds the client's reported 1 MB unreadable-response boundary`,
+      );
+      return result.structuredContent as T;
+    };
+    const assertView = (checkpoint: CheckpointView) => {
+      assert.deepEqual(checkpoint.preparedContext, {
+        workspace: app.deps.store.workItems.get(checkpoint.workItemId)?.workspace,
+        code: {
+          head: actual.head,
+          fingerprint: actual.fingerprint,
+          fileCount: files.length,
+        },
+      });
+      assert.equal(checkpoint.profileId, 'fake');
+      if (checkpoint.endCode !== null) {
+        assert.deepEqual(checkpoint.endCode, {
+          head: actual.head,
+          fingerprint: actual.fingerprint,
+          fileCount: files.length,
+        });
+      }
+    };
+    try {
+      const plan = await invoke<{ id: string }>('create_plan', {
+        title: 'Large repository survey',
+      });
+      const item = await invoke<WorkItem>('create_work_item', {
+        planId: plan.id,
+        title: 'Inspect the complete prompt',
+      });
+      await invoke('bind_workspace', { workItemId: item.id, worktreePath: repo });
+      await invoke('confirm_design', {
+        planId: plan.id,
+        goal: 'Inspect the prompt and target before dispatch.',
+        scope: 'The bound main worktree.',
+        constraints: 'Preserve code-state validation.',
+        acceptanceCriteria: 'MCP exposes complete instructions and compact code-state identity.',
+      });
+      const input = {
+        workItemId: item.id,
+        profileId: 'fake',
+        instructions: 'Return the full survey and appendix in the report content.',
+        endCondition: 'Stop when the report is complete.',
+      };
+      const prepared = await invoke<CheckpointView>('prepare_prompt', input);
+      assertView(prepared);
+      assert.equal(prepared.preparedContext.workspace.branch, 'main');
+      assert.equal(prepared.preparedContext.workspace.worktreeRoot, repo);
+      assert.ok(prepared.prompt.includes(input.instructions));
+      assert.ok(prepared.prompt.includes(input.endCondition));
+      const stored = app.deps.store.checkpoints.get(prepared.id);
+      assert.ok(stored);
+      assert.deepEqual(stored.preparedContext.code.files, files);
+      assert.equal(prepared.prompt, stored.prompt);
+      const inspected = await invoke<{ checkpoint: CheckpointView }>('get_checkpoint', {
+        checkpointId: prepared.id,
+      });
+      assertView(inspected.checkpoint);
+      assert.equal(inspected.checkpoint.prompt, stored.prompt);
+      const work = await invoke<{ checkpoints: CheckpointView[] }>('get_work_item', {
+        workItemId: item.id,
+      });
+      assert.equal(work.checkpoints.length, 1);
+      assert.ok(work.checkpoints[0]);
+      assertView(work.checkpoints[0]);
+
+      snapshot = { ...snapshot, fingerprint: 'changed-code' };
+      const invocationCount = agent.invocations.length;
+      const stale = (await client.callTool({
+        name: 'start_run',
+        arguments: { checkpointId: prepared.id },
+      })) as ToolResult;
+      assert.equal(stale.isError, true);
+      assert.equal((stale.structuredContent?.['error'] as { code: string }).code, 'PROMPT_STALE');
+      assert.equal(agent.invocations.length, invocationCount);
+      const discarded = await invoke<CheckpointView>('discard_prompt', {
+        checkpointId: prepared.id,
+      });
+      assert.equal(discarded.state, 'discarded');
+      assertView(discarded);
+
+      snapshot = { ...snapshot, fingerprint: actual.fingerprint };
+      const next = await invoke<CheckpointView>('prepare_prompt', input);
+      const report: WorkReport = {
+        status: 'completed',
+        summary: 'The requested survey is complete.',
+        commands: [],
+        unresolved: '',
+        requiredDecision: '',
+      };
+      agent.manualStep = { result: report };
+      const run = await invoke<AgentRun>('start_run', { checkpointId: next.id });
+      assert.equal(agent.invocations.at(-1)?.stdin, next.prompt);
+      await app.runs.waitForRun(run.id);
+      const finished = await invoke<{ checkpoint: CheckpointView }>('get_checkpoint', {
+        checkpointId: next.id,
+      });
+      assertView(finished.checkpoint);
+      assert.notEqual(finished.checkpoint.endCode, null);
+      assert.deepEqual(app.deps.store.checkpoints.get(next.id)?.endCode?.files, files);
+      const reviewed = await invoke<CheckpointView>('record_checkpoint_review', {
+        checkpointId: next.id,
+        evaluation: 'The complete report and target were inspected.',
+        action: 'complete',
+        decision: 'Accept the report.',
+      });
+      assertView(reviewed);
+      assert.equal(reviewed.state, 'reviewed');
+      assert.deepEqual(reviewed.report, report);
+    } finally {
       await client.close();
     }
   });

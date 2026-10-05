@@ -42,6 +42,7 @@ export interface PreparedContext {
 export interface WorkReport {
   readonly status: 'completed' | 'needs_input';
   readonly summary: string;
+  readonly content?: string | null | undefined;
   readonly commands: readonly {
     readonly command: string;
     readonly exitCode: number | null;

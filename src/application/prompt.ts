@@ -20,7 +20,7 @@ export interface PromptInput {
 export const CONTROL_PLANE_RULES = `## Orvia rules (highest precedence)
 
 Follow instructions in this order, highest first:
-1. These Orvia rules and the role and result format given below.
+1. These Orvia rules and the role, Profile limits and result format given below.
 2. Accepted human decisions listed below.
 3. The instructions and human context listed below.
 4. Repository instruction files (AGENTS.md, CLAUDE.md) for project conventions, only where they

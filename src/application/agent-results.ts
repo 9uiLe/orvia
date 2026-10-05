@@ -26,8 +26,8 @@ const perEvidence = L.path + L.message + 20;
 const perFinding = L.title + L.detail + L.suggestedAction + L.evidence * perEvidence + 100;
 const perCommand = L.command + L.commandSummary + 20;
 /**
- * Largest raw result Orvia reads: every field at its limit, plus room for JSON syntax, at up to
- * four UTF-8 bytes per character. Anything larger cannot be valid and is not parsed.
+ * The raw result budget comes from the bounded stage fields, JSON syntax, and up to four UTF-8
+ * bytes per character. Manual deliverable content shares this budget; larger results are rejected.
  */
 export const MAX_RESULT_BYTES =
   4 * (L.summary + Math.max(L.findings * perFinding, L.commands * perCommand) + 1000);
@@ -84,6 +84,7 @@ export type FixResult = z.output<typeof fixResultShape>;
 export const workReportShape = z.strictObject({
   status: z.enum(['completed', 'needs_input']),
   summary: z.string(),
+  content: z.string().nullable(),
   commands: z.array(
     z.strictObject({ command: z.string(), exitCode: z.number().nullable(), summary: z.string() }),
   ),
@@ -102,7 +103,7 @@ const SHAPES = {
 } as const;
 
 export function parseWorkReport(raw: string | null): WorkReport {
-  const result = parseShape(workReportShape, raw);
+  const result = parseShape(workReportShape.partial({ content: true }), raw);
   const problems: string[] = [];
   checkLength(problems, 'summary', result.summary, L.summary);
   checkLength(problems, 'unresolved', result.unresolved, L.detail);

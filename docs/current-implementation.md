@@ -200,6 +200,8 @@ creates a checkpoint (`K-n`) containing `workItemId`, `profileId`, `instructions
 It requires a confirmed design and, after a dispatched checkpoint, a recorded evaluation and
 accepted human decision. A checkpoint Profile must provide `workspaceRead` and
 `structuredResult`; it uses the Profile's effective capabilities for its work.
+The saved prompt states the Profile's capabilities, prohibits writes or commands when they
+are not granted, and does not assume subagent tools or model switching are available.
 `record_decision` can supersede only a decision with the same Plan and Work Item target;
 Plan-wide and Work Item decisions remain separate.
 
@@ -221,12 +223,21 @@ the checkpoint's prepared and recorded end fingerprints; it is `null` if end evi
 not be collected. Run metadata may be `null` after normal pruning while the report and saved
 prompt remain available.
 
+All public checkpoint responses (`prepare_prompt`, `get_checkpoint`, `get_work_item`,
+`discard_prompt`, `record_checkpoint_review`) summarize `preparedContext.code` and `endCode`
+as `{ head, fingerprint, fileCount }`. The bound workspace remains in `preparedContext.workspace`.
+Per-file fingerprints and context/Profile hashes remain internal. Full file identities are
+retained for stale-prompt validation and changed-file evidence; they are not prompt content.
+Consumers that previously inspected `.code.files` should use `fileCount` for the snapshot size
+and `get_checkpoint_changes` for change evidence.
+
 A manual work report has this shape:
 
 ```json
 {
   "status": "completed",
   "summary": "What changed",
+  "content": "Complete requested deliverable in Markdown, including quotations and appendices",
   "commands": [{ "command": "npm test", "exitCode": 0, "summary": "Reported check result" }],
   "unresolved": "",
   "requiredDecision": "Accept or request another checkpoint"
@@ -234,7 +245,11 @@ A manual work report has this shape:
 ```
 
 `status` is `completed` or `needs_input`. Command results are the agent's statements; Orvia
-does not run or attest those checks. Existing result limits apply: summary and unresolved
+does not run or attest those checks. `content` holds the complete requested deliverable;
+use `null` when there is no separate deliverable. Older reports without `content` are still
+accepted. Its text is persisted with the checkpoint and included in later checkpoint context.
+The existing total raw-result byte budget applies to the full JSON, including `content`;
+no separate character limit is imposed on it. Existing field limits apply: summary and unresolved
 text up to 2,000 characters, requiredDecision up to 1,000, up to 20 commands, each command
 and its summary up to 500 characters. Invalid or oversized output is rejected without
 truncating a report. `reportError` records nonzero/cancelled/interrupted runs, malformed,

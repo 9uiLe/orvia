@@ -2,6 +2,7 @@ import * as z from 'zod/v4';
 import { OrviaError } from '../domain/errors.ts';
 import { idPattern, type EntityKind, type IdByKind } from '../domain/ids.ts';
 import { describeProfiles } from './agent-profiles.ts';
+import { checkpointView } from './checkpoint-view.ts';
 import { CYCLE_MODES } from '../domain/cycle.ts';
 import { REVIEW_ACTIONS } from '../domain/checkpoint.ts';
 import { PLAN_STATUSES } from '../domain/plan.ts';
@@ -245,7 +246,7 @@ export const OPERATIONS: readonly Operation[] = [
       instructions: text('Instructions for this checkpoint'),
       endCondition: text('When the agent must stop and report back'),
     }),
-    handler: (app, input) => app.checkpoints.prepare(input),
+    handler: async (app, input) => checkpointView(await app.checkpoints.prepare(input)),
   }),
   defineOperation({
     name: 'get_checkpoint',
@@ -263,7 +264,7 @@ export const OPERATIONS: readonly Operation[] = [
       'Mark an unsent prepared prompt as discarded. Its content remains readable; it can no longer be sent.',
     operationClass: 'control',
     input: z.object({ checkpointId: id('checkpoint', 'Prepared checkpoint id') }),
-    handler: (app, input) => app.checkpoints.discard(input),
+    handler: (app, input) => checkpointView(app.checkpoints.discard(input)),
   }),
   defineOperation({
     name: 'record_checkpoint_review',
@@ -277,7 +278,7 @@ export const OPERATIONS: readonly Operation[] = [
       action: z.enum(REVIEW_ACTIONS),
       decision: text('The human decision and its rationale'),
     }),
-    handler: (app, input) => app.checkpoints.review(input),
+    handler: (app, input) => checkpointView(app.checkpoints.review(input)),
   }),
   defineOperation({
     name: 'get_checkpoint_changes',

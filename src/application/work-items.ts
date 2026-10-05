@@ -3,7 +3,7 @@ import { OrviaError } from '../domain/errors.ts';
 import type { PlanId, WorkItemId } from '../domain/ids.ts';
 import { assertPlanAcceptsChanges } from '../domain/plan.ts';
 import type { AgentRun } from '../domain/records.ts';
-import type { Checkpoint } from '../domain/checkpoint.ts';
+import { checkpointView, type CheckpointView } from './checkpoint-view.ts';
 import {
   assertWorkItemAcceptsChanges,
   OPEN_STATUSES,
@@ -21,7 +21,7 @@ export interface WorkItemDetails {
   readonly workItem: WorkItem;
   readonly currentRun: AgentRun | null;
   readonly runs: AgentRun[];
-  readonly checkpoints: Checkpoint[];
+  readonly checkpoints: CheckpointView[];
 }
 
 export interface RunControl {
@@ -78,7 +78,7 @@ export function getWorkItem(
     workItem,
     currentRun: deps.store.runs.current(workItem.id),
     runs: deps.store.runs.listForWorkItem(workItem.id),
-    checkpoints: deps.store.checkpoints.listForWorkItem(workItem.id),
+    checkpoints: deps.store.checkpoints.listForWorkItem(workItem.id).map(checkpointView),
   };
 }
 

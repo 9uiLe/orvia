@@ -8,6 +8,15 @@ Before 1.0.0, minor versions may contain breaking changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- Checkpoint responses summarize code snapshots with HEAD, fingerprint and file count instead
+  of exposing internal per-file identities. Large repositories no longer inflate prompt-inspection
+  responses with those identities; stored code evidence and stale-prompt checks are preserved.
+- Checkpoint prompts state Profile restrictions and store full requested deliverables in the
+  manual work report's `content` field separately from its bounded summary. Older reports
+  without `content` remain accepted.
+
 ### Added
 
 - Confirmed immutable design revisions (`confirm_design`) and durable checkpoint prompts

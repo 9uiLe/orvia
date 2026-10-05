@@ -10,7 +10,8 @@ import type {
 } from '../../src/application/ports.ts';
 import { runCacheRefs } from '../../src/application/storage.ts';
 import type { OverallStatus } from '../../src/application/status.ts';
-import type { Checkpoint, WorkReport } from '../../src/domain/checkpoint.ts';
+import type { WorkReport } from '../../src/domain/checkpoint.ts';
+import type { CheckpointView as Checkpoint } from '../../src/application/checkpoint-view.ts';
 import { OrviaError } from '../../src/domain/errors.ts';
 import type { AgentRun } from '../../src/domain/records.ts';
 import type { Daemon } from '../../src/interface/daemon/daemon.ts';

@@ -12,7 +12,14 @@ import {
 } from '../domain/work-item.ts';
 import { assertWorkspaceMatches } from '../domain/workspace.ts';
 import { assertCheckpointProfile, requireProfile } from './agent-profiles.ts';
-import { parseWorkReport, resultJsonSchema, ResultProtocolError } from './agent-results.ts';
+import {
+  parseWorkReport,
+  resultJsonSchema,
+  ResultProtocolError,
+  RESULT_LIMITS,
+  MAX_RESULT_BYTES,
+} from './agent-results.ts';
+import { checkpointView } from './checkpoint-view.ts';
 import { nowIso, type Dependencies } from './dependencies.ts';
 import { requirePlan } from './plans.ts';
 import { composeAgentPrompt } from './prompt.ts';
@@ -142,6 +149,7 @@ export class CheckpointSupervisor {
     const context = this.#context(input.workItemId);
     const workspace = requireBoundWorkspace(context.item);
     const profileHash = await this.#profileHash(input.profileId);
+    const profile = requireProfile(this.#deps.profiles, input.profileId);
     assertWorkspaceMatches(
       context.item.id,
       workspace,
@@ -161,7 +169,15 @@ export class CheckpointSupervisor {
       (context.previous === null
         ? ''
         : `\n## Previous checkpoint ${context.previous.id}\nAgent-reported work: ${JSON.stringify(context.previous.report)}\nRun status: ${context.previous.runStatus}\nReport error: ${context.previous.reportError}\nApp evaluation and human decision: ${JSON.stringify(context.previous.reviews.at(-1))}\n`) +
-      `\n## Work report\nWork autonomously within the confirmed scope, including tests and needed fixes. Stop at the end condition or when human input is needed. Return only JSON matching this schema. Report commands as your own reported checks, not proof supplied by Orvia. Put missing checks and unresolved work in unresolved.\n${JSON.stringify(resultJsonSchema('manual'))}\n`;
+      `\n## Profile limits\nProfile: ${profile.id}. Granted capabilities: ${profile.capabilities.join(', ')}.\n` +
+      (profile.capabilities.includes('workspaceWrite')
+        ? ''
+        : 'Do not write files. This Profile permits read-only investigation.\n') +
+      (profile.capabilities.includes('commandExecution')
+        ? ''
+        : 'Command execution is not granted by this Profile. Do not run commands.\n') +
+      'Do not assume subagents or model switching are available. Follow an explicitly authorized alternative when tools required by the instructions are unavailable; otherwise report needs_input.\n' +
+      `\n## Work report\nWork autonomously within the confirmed scope and Profile limits. Stop at the end condition or when human input is needed. Return only JSON matching this schema. Put the complete requested deliverable, including the report body, source quotations and appendices, in content as Markdown; use null when no separate deliverable is requested. Do not replace the deliverable with a summary. Keep summary within ${RESULT_LIMITS.summary} characters. The entire JSON must fit within ${MAX_RESULT_BYTES} UTF-8 bytes; if the complete deliverable cannot fit, return needs_input and explain the missing deliverable in unresolved rather than silently truncating it. Report commands as your own reported checks, not proof supplied by Orvia; use an empty commands array when no commands were run. Put missing checks and unresolved work in unresolved.\n${JSON.stringify(resultJsonSchema('manual'))}\n`;
     return this.#deps.store.transaction(() => {
       this.#assertCanPrepare(input.workItemId);
       if (hash(this.#context(input.workItemId)) !== hash(context)) {
@@ -192,7 +208,7 @@ export class CheckpointSupervisor {
     const checkpoint = this.require(input.checkpointId);
     const run = checkpoint.runId === null ? null : this.#deps.store.runs.get(checkpoint.runId);
     return {
-      checkpoint,
+      checkpoint: checkpointView(checkpoint),
       design: this.#deps.store.designRevisions.get(checkpoint.designRevisionId),
       run,
       recordingState:
