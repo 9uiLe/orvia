@@ -106,7 +106,7 @@ export class StorageService {
       }
     };
 
-    // One run per transaction, like every other reserve transaction (ADR 0009).
+    // One run per transaction, matching the shared control-reserve budget.
     const pruned = { runIds: [] as string[], outputRefs: [] as string[] };
     const candidates = attempt(
       'database:runs',

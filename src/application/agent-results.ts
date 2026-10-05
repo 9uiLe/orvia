@@ -3,7 +3,7 @@ import { FINDING_CATEGORIES, REVIEW_VERDICTS, VERIFICATION_STATUSES } from '../d
 
 /**
  * Limits on what a structured agent result may put into the durable database, approved by the
- * maintainer (ADR 0010). Results beyond them are rejected, never truncated, and the cycle
+ * maintainer. Results beyond them are rejected, never truncated, and the cycle
  * blocks; the raw output stays in the bounded cache for inspection.
  */
 export const RESULT_LIMITS = {

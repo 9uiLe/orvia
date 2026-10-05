@@ -13,7 +13,7 @@ import { config, makeTestEnv, silentLogger, type TestEnv } from '../helpers/env.
 import { addWorktree, createRepository } from '../helpers/git.ts';
 import { NodeProcessLauncher } from '../../src/infrastructure/agents/process-launcher.ts';
 
-// Process-group termination is guaranteed on macOS and Linux only (ADR 0008).
+// Process-group termination is guaranteed on macOS and Linux only.
 const posix = process.platform !== 'win32';
 
 function alive(pid: number): boolean {

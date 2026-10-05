@@ -129,7 +129,7 @@ export class RunSupervisor implements RunControl {
 
   /**
    * Marks runs left `running` by a previous daemon process as interrupted, one run per
-   * transaction: control transactions must stay one-row changes (ADR 0009), and recovery needs
+   * transaction: control transactions must stay one-row changes, and recovery needs
    * no atomicity across runs. Runs already marked stay marked, so a later recovery only handles
    * the runs still `running`.
    *

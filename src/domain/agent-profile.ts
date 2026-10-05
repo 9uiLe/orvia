@@ -17,7 +17,7 @@ export const PROFILE_ID_PATTERN = /^[a-z][a-z0-9-]{0,62}$/;
 
 /**
  * Review needs no command execution: Orvia collects the change evidence from git itself and
- * puts it into the review prompt (ADR 0011).
+ * puts it into the review prompt.
  */
 const REQUIRED: Readonly<Record<StageState, readonly AgentCapability[]>> = {
   IMPLEMENTING: ['workspaceRead', 'workspaceWrite', 'structuredResult'],

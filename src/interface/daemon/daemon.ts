@@ -115,7 +115,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     }
     if (recovery.state === 'incomplete') {
       // Degraded start: inspection, controls, and cleanup stay available; writes are refused
-      // until a restart completes recovery (ADR 0009).
+      // until a restart completes recovery.
       logger.error('startup recovery incomplete: database storage reserve exhausted', {
         remaining: recovery.remainingRunIds.length,
       });
