@@ -200,6 +200,8 @@ creates a checkpoint (`K-n`) containing `workItemId`, `profileId`, `instructions
 It requires a confirmed design and, after a dispatched checkpoint, a recorded evaluation and
 accepted human decision. A checkpoint Profile must provide `workspaceRead` and
 `structuredResult`; it uses the Profile's effective capabilities for its work.
+`record_decision` can supersede only a decision with the same Plan and Work Item target;
+Plan-wide and Work Item decisions remain separate.
 
 Checkpoint states are `prepared` → `running` → `awaiting_review` → `reviewed`. An unsent
 prompt can be marked `discarded` with `discard_prompt` while its text remains readable.
@@ -209,6 +211,9 @@ workspace mismatches are refused (`WORKSPACE_MISMATCH`). Repeating a consumed ch
 does not create a second run, including after its Run metadata has been pruned.
 An active legacy cycle blocks checkpoint preparation; a Work Item with dispatched checkpoints
 cannot start a legacy cycle.
+An ended checkpoint can be evaluated while its Work Item is paused, including acceptance
+with `complete`. After `continue` or `revise`, explicitly resume the Work Item before
+preparing or sending the next checkpoint.
 
 `get_checkpoint` returns the durable checkpoint, its design, available Run metadata, review
 decisions, `verificationSource: "agent_reported"`, and `changedFiles`. That file list compares
@@ -235,8 +240,10 @@ and its summary up to 500 characters. Invalid or oversized output is rejected wi
 truncating a report. `reportError` records nonzero/cancelled/interrupted runs, malformed,
 oversized or missing output, unavailable code state, or report storage exhaustion. A failure
 does not create a successful replacement report or start a new run.
+If the result schema cannot be saved completely before launch, preparation remains intact
+and dispatch fails with `RESULT_STORAGE_EXHAUSTED` without creating a Run or starting an agent.
 
-`get_checkpoint` also returns `recordingState`: `pending` while the run/report is being
+`get_checkpoint` and `get_status` also return `recordingState`: `pending` while the run/report is being
 recorded, `recorded` after persistence, or `incomplete` when the run ended but the checkpoint
 could not be updated. Incomplete recording blocks the next preparation; restart can recover
 the checkpoint with an explicit missing-report cause. Daemon shutdown waits for report persistence.
@@ -254,13 +261,18 @@ delete/add entries. `matchesReport` is `false` when current code differs from th
 end state, and `null` if no end state is available. It does not return a historical diff.
 
 The code fingerprint includes HEAD, index entries, tracked contents, and all nonignored
-untracked contents, including binary data, mode changes and symlink target names. Collection
-checks for concurrent changes and fails with `STALE_CODE_STATE`; incomplete Git listings
+untracked contents, including binary data, mode changes and symlink target names, and
+`assume-unchanged` / `skip-worktree` flags when present. Mode evidence is collected even
+when `core.filemode=false`, without changing the repository configuration. Collection checks for concurrent changes and fails with `STALE_CODE_STATE`; incomplete Git listings
 cannot produce a complete fingerprint. Submodule snapshots are explicitly unsupported.
 
 `maxBytes` bounds the returned file-list/diff content. `complete: false` means some evidence
-is omitted, for example a large result or binary content; request a larger result or read the
-listed source files. Source pages use byte offsets and currently always encode `content` as
+is omitted, for example a large result, binary content or a diff that cannot be preserved as
+UTF-8 text. Paths with `assume-unchanged` or `skip-worktree` appear as `status: "unchecked"`
+and make evidence incomplete because Git may suppress their working-tree differences.
+Request a larger result for size truncation, or read the listed source files. Returned text
+stays within the requested byte budget even at a UTF-8 character boundary.
+Source pages use byte offsets and currently always encode `content` as
 base64, including text. They return `totalBytes`, `nextOffset`, `encoding`, `head`,
 `fingerprint`, `observedAt`, `checkpointId`, `matchesReport` and `complete`. A page is complete only when it covers the whole
 file from offset zero. Use the returned `nextOffset` and the same `expectedFingerprint` for
@@ -349,8 +361,9 @@ start_cycle (implement)          start_cycle (review_existing)
   files) and the diff from the cycle's base commit (`HEAD` when the cycle starts, or
   `--base-ref`) to the working tree. They go into the review prompt as data. The reviewer gets
   only read access, is told not to rely on the implementer's report, and returns structured
-  findings, each with a category and evidence. If the changes exceed
-  `orchestration.max_review_diff_kb` (256 KiB), no partial review is done: the cycle stops at
+  findings, each with a category and evidence. Untracked text content is included. If the
+  changes exceed `orchestration.max_review_diff_kb` (256 KiB), or evidence is incomplete
+  because of binary content, invalid UTF-8 or unchecked Git entries, no partial review is done: the cycle stops at
   `NEEDS_HUMAN / CHANGES_TOO_LARGE`.
 - **Fix (auto-fix)**: failed checks, and findings in routine categories (correctness, test,
   build, style, and code that clearly differs from a recorded decision or acceptance criterion)
@@ -366,7 +379,7 @@ start_cycle (implement)          start_cycle (review_existing)
 | `AGENT_NEEDS_INPUT`        | the implementation or fix agent needs information or a decision                                                                                                                                                                                 |
 | `FIX_DISPUTED`             | the fix agent disagrees with a finding                                                                                                                                                                                                          |
 | `LOOP_LIMIT`               | automatic fixes reached `orchestration.max_review_fix_cycles` (default 3)                                                                                                                                                                       |
-| `CHANGES_TOO_LARGE`        | the changes to review exceed `orchestration.max_review_diff_kb`                                                                                                                                                                                 |
+| `CHANGES_TOO_LARGE`        | the review evidence exceeds `orchestration.max_review_diff_kb` or cannot completely represent the changes                                                                                                                                       |
 
 The decision is made by Orvia's fixed rules, not by a model. A review with any finding for a
 human starts no fix. `get_cycle` shows the reason and the ids of the findings that need you;
@@ -495,6 +508,8 @@ orvia <operation> --flag value …   e.g. orvia get-plan --plan-id P-1
 Every operation prints JSON. The CLI and MCP tools are generated from the same operation
 registry, so they behave identically. Migrations run when the daemon starts; `orvia migrate`
 reports the result.
+`--input` accepts a JSON object; malformed JSON, arrays and scalar values fail with
+`VALIDATION_FAILED`. Interrupted or invalid daemon responses fail with `INTERNAL`.
 
 ### MCP client integration
 
@@ -619,7 +634,9 @@ Agent output, diffs and source content are not stored in SQLite. Prepared prompt
 validated work reports are durable exceptions: they are subject to the same database hard
 budget, with failed writes rolled back. Normal Run pruning can clear a checkpoint's `runId`
 without removing its saved prompt, report, run status or review history. Storage cleanup never
-touches git repositories, worktrees, branches, or commits; this is tested.
+touches git repositories, worktrees, branches, or commits; this is tested. Until report
+recording finishes, its Run metadata, log, raw result and schema are protected from cleanup,
+even after the agent exits.
 
 **`database_max_mb` is a hard budget.** It covers `state.db`, its rollback journal, any WAL or SHM
 left by an older build, and every migration backup. Orvia's database operations never take
@@ -640,6 +657,8 @@ its journal, a new backup, existing backups, and the control reserve all fit in
 `database_max_mb`. If they do not, the daemon refuses to start with
 `MIGRATION_STORAGE_REQUIRED` and changes nothing. The error says how many bytes are needed. In
 practice a migration needs about three times the database size within the budget.
+Migration history must contain every applied version in order with matching checksums;
+a missing intermediate row is refused with `DATABASE_INTEGRITY_FAILED` before any mutation.
 
 **When durable data fills the budget.** Cleanup only removes run records, cache, and expired
 backups; it never deletes Plans, Work Items, design revisions, checkpoints, decisions, or notes. Archiving changes a status and
@@ -764,7 +783,8 @@ Experimental:
 
 - Standard checkpoint operations: confirmed designs, prepared prompt preview and exact
   `start_run({ checkpointId })`, durable reports, human evaluation/decisions, and public Git
-  changes/source evidence. All 292 tests and code, CLI, and MCP protocol checks pass; desktop-app use and
+  changes/source evidence. Code, CLI, and MCP protocol checks pass
+  ([verification log](implementation-plan.md#作業結果)); desktop-app use and
   the new full checkpoint workflow with real agents have not been verified.
 - Opt-in legacy orchestration cycles: implement → verify → review → fix, structured review
   findings with Orvia-collected git evidence, deterministic escalation to the human, loop limit,
@@ -846,6 +866,9 @@ measured `get_status` at 1.81–1.94 ms p95 in-process and 2.52–2.72 ms over t
 runs.
 These are recorded measurements, not a product performance target. CI does not enforce a
 latency threshold on shared runners.
+Both benchmark scripts accept `--plans`, `--work-items-per-plan` and `--iterations` as positive safe
+integers, with the existing defaults of 100, 5 and 500. Invalid counts fail before setup.
+The storage benchmark waits for its sampler to be ready and stops it on success or failure.
 
 ## Contributing
 

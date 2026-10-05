@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'node:test';
 import type {
@@ -8,6 +8,8 @@ import type {
   SyncResult,
   TransactionMode,
 } from '../../src/application/ports.ts';
+import { runCacheRefs } from '../../src/application/storage.ts';
+import type { OverallStatus } from '../../src/application/status.ts';
 import type { Checkpoint, WorkReport } from '../../src/domain/checkpoint.ts';
 import { OrviaError } from '../../src/domain/errors.ts';
 import type { AgentRun } from '../../src/domain/records.ts';
@@ -111,10 +113,34 @@ describe('checkpoint failure boundaries', () => {
       },
     };
     const { running, checkpoint } = await setup(launcher);
-    await assert.rejects(
+    const snapshotEntered = Promise.withResolvers<undefined>();
+    const snapshotRelease = Promise.withResolvers<undefined>();
+    const originalSnapshot = running.app.deps.git.snapshot.bind(running.app.deps.git);
+    running.app.deps.git.snapshot = async (root) => {
+      const snapshot = await originalSnapshot(root);
+      if (launches > 0) {
+        snapshotEntered.resolve(undefined);
+        await snapshotRelease.promise;
+      }
+      return snapshot;
+    };
+    const dispatch = assert.rejects(
       call(running.app, 'start_run', { checkpointId: checkpoint.id }),
       /spawn exploded/,
     );
+    try {
+      await snapshotEntered.promise;
+      const pending = await call<CheckpointView>(running.app, 'get_checkpoint', {
+        checkpointId: checkpoint.id,
+      });
+      const status = await call<OverallStatus>(running.app, 'get_status');
+      assert.equal(pending.run?.status, 'failed');
+      assert.equal(pending.recordingState, 'pending');
+      assert.equal(status.openWorkItems[0]?.checkpoint?.recordingState, 'pending');
+    } finally {
+      snapshotRelease.resolve(undefined);
+      await dispatch;
+    }
     const view = await call<CheckpointView>(running.app, 'get_checkpoint', {
       checkpointId: checkpoint.id,
     });
@@ -131,6 +157,59 @@ describe('checkpoint failure boundaries', () => {
     assert.equal(agent.invocations.length, 1);
     assert.equal(running.store.runs.listForWorkItem('W-1').length, 1);
     await rejectsWith(call(running.app, 'prepare_prompt', PREPARE), 'HUMAN_REVIEW_REQUIRED');
+  });
+
+  test('cleanup retains expired result input until the checkpoint report is recorded', async () => {
+    const { running, checkpoint } = await setup();
+    const resultReadEntered = Promise.withResolvers<undefined>();
+    const resultReadRelease = Promise.withResolvers<undefined>();
+    const originalRead = running.app.deps.cache.readHead.bind(running.app.deps.cache);
+    running.app.deps.cache.readHead = async (ref, maxBytes) => {
+      resultReadEntered.resolve(undefined);
+      await resultReadRelease.promise;
+      return originalRead(ref, maxBytes);
+    };
+    const run = await call<AgentRun>(running.app, 'start_run', { checkpointId: checkpoint.id });
+    assert.ok(run.outputRef !== null);
+    const resultPath = running.app.deps.cache.absolutePath(runCacheRefs(run.outputRef).result);
+    writeFileSync(release, '');
+    try {
+      await resultReadEntered.promise;
+      const expired = new Date(
+        Date.now() - (running.app.deps.limits.retentionDays + 1) * 24 * 60 * 60 * 1000,
+      );
+      utimesSync(resultPath, expired, expired);
+      await call(running.app, 'run_storage_cleanup');
+      assert.equal(existsSync(resultPath), true);
+    } finally {
+      resultReadRelease.resolve(undefined);
+      await running.app.runs.waitForRun(run.id);
+    }
+    const view = await call<CheckpointView>(running.app, 'get_checkpoint', {
+      checkpointId: checkpoint.id,
+    });
+    assert.deepEqual(view.checkpoint.report, REPORT);
+    assert.equal(view.checkpoint.reportError, null);
+    await call(running.app, 'run_storage_cleanup');
+    assert.equal(existsSync(resultPath), false);
+  });
+
+  test('a result schema write failure leaves the prompt prepared and launches no agent', async () => {
+    const { running, checkpoint } = await setup();
+    const originalWriter = running.app.deps.cache.createWriter.bind(running.app.deps.cache);
+    running.app.deps.cache.createWriter = (ref, options) => {
+      if (ref.endsWith('.schema.json')) {
+        mkdirSync(running.app.deps.cache.absolutePath(ref), { recursive: true });
+      }
+      return originalWriter(ref, options);
+    };
+    await rejectsWith(
+      call(running.app, 'start_run', { checkpointId: checkpoint.id }),
+      'RESULT_STORAGE_EXHAUSTED',
+    );
+    assert.equal(agent.invocations.length, 0);
+    assert.deepEqual(running.store.runs.listForWorkItem('W-1'), []);
+    assert.equal(running.store.checkpoints.get(checkpoint.id)?.state, 'prepared');
   });
 
   test('ordinary report storage exhaustion records the failure in reserve and waits for a human', async () => {
@@ -167,6 +246,8 @@ describe('checkpoint failure boundaries', () => {
     });
     assert.deepEqual(rejected, ['write', 'reserve']);
     assert.equal(incomplete.recordingState, 'incomplete');
+    const status = await call<OverallStatus>(running.app, 'get_status');
+    assert.equal(status.openWorkItems[0]?.checkpoint?.recordingState, 'incomplete');
     assert.equal(incomplete.run?.status, 'succeeded');
     assert.equal(incomplete.checkpoint.report, null);
     await rejectsWith(call(running.app, 'prepare_prompt', PREPARE), 'HUMAN_REVIEW_REQUIRED');

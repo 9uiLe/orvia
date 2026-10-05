@@ -167,3 +167,65 @@ unit test で補う。関連する storage/migration/process の既存保証を�
 - 残る作業: 3 の ChatGPT.app / Claude.app による基本フローの確認。
   このセッションでは実アプリを操作する接続を確認できていないため、利用環境を問い合わせた。
   SDK/CLI試験を実アプリの往復や新しい全フローのreal-agent確認結果として扱わない。
+
+### プロジェクト全体の保守性改善（2026-10-05）
+
+- Mode: Improve。対象は直前のコミットに限定せず、`src/`、`test/`、`scripts/`、
+  設定・依存・CI とリポジトリ内の仕様・利用資料全体。
+- 根拠: 人がアプリで評価・判断する仕様、既存の状態遷移・保存容量・公開 API の契約と
+  既存テスト。採用条件は、その契約に反する入力・状態・失敗経路、または具体的な
+  変更影響を再現できること。既知の3件を含む下記21件を重要度によらず修正した。
+- 変更理由: 完全性の誤表示、保存処理の順序への依存、不正な境界入力により、
+  アプリから安全に作業を評価できず、失敗時の状態や保証責任が利用者・呼び出し側に漏れていた。
+  状態の所有者で判定を共有し、境界で入力・出力を検証する。
+
+Evidence の位置は修正後のコード。観測事実は修正前の再現結果を記載する。
+
+| Severity | Category             | Finding                                                      | Evidence                                                                                                | Impact                                   | Direction（実施済み）                                           |
+| -------- | -------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------- | ---------------------------------------- | --------------------------------------------------------------- |
+| High     | 仕様との不一致       | 検査省略フラグ付きの変更を完全と表示                         | `src/infrastructure/git/repository-evidence.ts:422`: `assume-unchanged` の編集で差分なし・complete=true | 評価から変更が欠落                       | フラグを fingerprint に含め、unchecked と不完全性を返す         |
+| High     | 仕様との不一致       | UTF-8 差分が byte 上限を超える                               | `src/infrastructure/git/git-cli.ts:29`: 300 bytes 指定で592 bytes返却                                   | caller の予算とページ契約が崩れる        | Buffer で制限し文字境界を保持。不正 UTF-8 も partial            |
+| High     | 仕様との不一致       | filemode 設定で executable bit 変更が欠落                    | `src/infrastructure/git/repository-evidence.ts:29`: core.filemode=false で chmod の差分なし             | 実行可能性の変更をレビューできない       | diff コマンドだけ core.filemode=true を指定                     |
+| High     | API boundary         | 小さい未追跡ファイルに巨大な予算を指定するとメモリ確保が失敗 | `src/infrastructure/git/repository-evidence.ts:490`: maxBytes=MAX_SAFE_INTEGER で RangeError            | 有効な取得要求が失敗                     | 実ファイルサイズに応じた Buffer を確保                          |
+| High     | 仕様との不一致       | 互換サイクルの証跡が未追跡内容・部分差分を完全と扱う         | `src/infrastructure/git/repository-evidence.ts:355`: 未追跡本文がレビュー入力にない                     | 不完全な材料でレビューを続ける           | 差分収集を共有し、partial は既存の CHANGES_TOO_LARGE で判断待ち |
+| High     | 仕様との不一致       | 正常な報告保存待ちを incomplete と表示                       | `src/application/runs.ts:490`: Run 終了から Git 取得・保存まで誤表示                                    | 一時状態を保存失敗と誤認                 | 同じ保存ライフサイクル判定を checkpoint/status が参照           |
+| High     | 仕様との不一致       | cleanup が保存待ち出力を削除                                 | `src/application/storage.ts:119`: 終了後・保存前の TTL cleanup で RESULT_LOST                           | 保持契約に反して報告が失われる           | 保存待ち Run と全 cache ref を保護                              |
+| High     | 不正な状態           | 別の対象の判断を supersede できる                            | `src/application/records.ts:83`: 別 Work Item や Plan 全体の判断が失効                                  | 判断の有効範囲が混ざる                   | 同じ planId/workItemId の組に限定                               |
+| High     | 仕様との不一致       | schema 保存失敗後にも CLI を起動                             | `src/application/runs.ts:313`: schema 書き込み失敗の close 結果を無視                                   | 報告不能な実行が始まる                   | failed/truncated/bytes を確認し、準備を保持して起動拒否         |
+| Medium   | 不正な状態           | 中断中の終了済み区切りを評価できない                         | `src/application/checkpoints.ts:308`: paused に実行用 guard を適用                                      | 停止と評価の責務が結合                   | 評価は変更可能状態で許可。次の実行には再開を要求                |
+| High     | 仕様との不一致       | migration 適用履歴の欠落を許容                               | `src/infrastructure/sqlite/migrator.ts:134`: 中間・先頭の履歴削除でも最終 version 一致で受理            | DB 整合性の保証が崩れる                  | 件数と連続 version を確認し、変更前に拒否                       |
+| High     | 仕様との不一致       | 実行可能な directory を command と判定                       | `src/infrastructure/agents/process-launcher.ts:27`: X_OK の directory を available と表示               | 準備と実起動の契約が不一致               | 実行権限と regular file を確認。symlink は維持                  |
+| High     | 仕様との不一致       | cache close callback の失敗を取り落とす                      | `src/infrastructure/cache/file-cache.ts:113`: callback error が error event より先でも failed=false     | 上位層で保存成功と誤認                   | close の error 引数を失敗結果に反映                             |
+| High     | 不正な状態           | benchmark が無効な workload を受理                           | `scripts/benchmark-options.ts:12`: 0/NaN/Infinity/小数で無効な測定・NaN                                 | 成功表示の測定値を信頼できない           | 正の safe integer を setup 前に検証。既定値は維持               |
+| High     | 強い coupling        | sampler 起動直後の停止で応答なし                             | `scripts/storage-sampler.ts:44`: 1×1×1 で空出力を JSON.parse                                            | 測定成立が OS の起動順序に依存           | ready を待ち、close 後に出力を解釈                              |
+| Medium   | 強い coupling        | benchmark 失敗後に sampler が残る                            | `scripts/bench-storage.ts:107`: 異常時に停止処理を通らない                                              | 終了処理が正常系の順序に依存             | finally で停止・daemon close・一時領域 cleanup                  |
+| Low      | Repository coherence | benchmark コメントの参照先が古い                             | `scripts/bench.ts:3`: README に移動済み Performance 節を参照                                            | 測定の文脈を見つけられない               | 現行実装ガイドの Performance を参照                             |
+| High     | API boundary         | 不正な IPC response の shape を受理                          | `src/interface/ipc-protocol.ts:17`: null/不正 error/非 Boolean ok で例外または誤受理                    | consumer の失敗処理が不安定              | wire response を decode し INTERNAL に正規化                    |
+| High     | API boundary         | 途中で切れた HTTP 応答が待機のまま                           | `src/interface/ipc-client.ts:41`: headers 後の切断で response error 未処理                              | CLI/MCP の要求が終了しない               | response error を INTERNAL で返す                               |
+| Medium   | API boundary         | CLI --input が非 object を受理                               | `src/interface/cli/main.ts:86`: null と flag の併用で TypeError、array の flag 消失                     | 公開入力契約と失敗表現が崩れる           | JSON object を検証して VALIDATION_FAILED                        |
+| Medium   | Repository coherence | SECURITY が独自 sandbox を予定と説明                         | `SECURITY.md:19`: adapter 境界の仕様と異なる将来保証                                                    | 利用者・実装者が誤った安全性を前提にする | 現行の adapter 権限と workspace 検証の責任を明記                |
+
+#### 保証責任と文書の整合性
+
+- Git の実リポジトリ、SQLite、FileCache、プロセス、HTTP socket、CLI を用いる
+  integration test で各境界の契約を検証する。既存の成功系は重複させず、欠けていた
+  失敗・中断・保存中の状態を追加した。benchmark 引数の値判定は unit test で保証する。
+- 既存テストの削除・統合はなく、現在の実装に合わせて期待する仕様を弱めていない。
+  cache close の伝播は実 FileCache の schema 保存失敗試験で保証する。
+- 仕様の正本、現行利用ガイド、CONTEXT、SECURITY、CHANGELOG、benchmark の説明を
+  修正後の責任・状態・失敗表現に合わせた。過去の検証件数は履歴として残し、現行説明の
+  固定件数はこの作業結果への参照にした。ADR は追加していない。
+- dependency/lockfile、設定値、CI、README の入口と適用済み SQL migration は
+  現行契約と整合しており変更不要。新しい依存、数値の quota、DB schema は追加していない。
+- 有効な既存 fingerprint は保持する。検査省略フラグがある場合だけ識別情報を加える。
+  差分取得はリポジトリの index・config を変更しない。互換サイクルでは全文 snapshot を
+  新たに必須化せず、既存の状態取得コストを保つ。
+- 検証: `npm run check` で全314テスト（従来292件に22件追加）、型、lint、
+  runtime 依存一覧、build が通過した。テストの失敗・中止・skip は0。
+  最初の lint で検出した IPC の reject 型を修正した後、全チェックを完了した。
+  既存のファイル監視試験はサンドボックス内で EMFILE となるため、承認された
+  サンドボックス外で実行した。監視試験の契約は変更していない。
+  benchmark の1 Plan・1 Work Item・1 iteration で実測が成立し、
+  不正な件数は setup 前に拒否されることも確認した。
+- 未検証の外部条件: ChatGPT.app / Claude.app の実接続と基本フロー、および今回の
+  checkpoint 全フローの real-agent 確認。既存の SDK/CLI 結果で代用しない。

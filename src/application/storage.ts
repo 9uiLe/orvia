@@ -6,11 +6,12 @@ import {
   type StorageUsage,
 } from '../domain/storage.ts';
 import type { Dependencies } from './dependencies.ts';
+import type { RunId } from '../domain/ids.ts';
 import type { CleanupFailure } from './ports.ts';
 
 /**
- * Every cache entry of one run, derived from its log ref: the log, and for cycle stages the raw
- * stdout result and the result schema. Cleanup protects and removes them together.
+ * Every cache entry of one run, derived from its log ref: the log, raw stdout result and result
+ * schema. Cleanup protects and removes them together until report recording finishes.
  */
 export function runCacheRefs(outputRef: string): {
   log: string;
@@ -50,10 +51,12 @@ export interface CleanupReport {
  */
 export class StorageService {
   readonly #deps: Dependencies;
+  readonly #recordingRunIds: () => readonly RunId[];
   #running: Promise<CleanupReport> | null = null;
 
-  constructor(deps: Dependencies) {
+  constructor(deps: Dependencies, recordingRunIds: () => readonly RunId[]) {
     this.#deps = deps;
+    this.#recordingRunIds = recordingRunIds;
   }
 
   async status(): Promise<StorageStatus> {
@@ -113,7 +116,9 @@ export class StorageService {
       () => store.runs.listFinishedBeyond(limits.maxCompletedRunsPerWorkItem),
       [],
     );
+    const recordingRunIds = new Set(this.#recordingRunIds());
     for (const candidate of candidates) {
+      if (recordingRunIds.has(candidate.runId)) continue;
       const deleted = attempt(
         `database:run:${candidate.runId}`,
         () => {
@@ -133,9 +138,17 @@ export class StorageService {
 
     const expiresBefore = new Date(clock.now().getTime() - limits.retentionDays * DAY_MS);
     const protectedRefs = new Set(
-      attempt('database:running', () => store.runs.listRunning(), []).flatMap((run) =>
-        run.outputRef === null ? [] : allRunCacheRefs(run.outputRef),
-      ),
+      attempt(
+        'database:pending',
+        () => [
+          ...store.runs.listRunning(),
+          ...this.#recordingRunIds().flatMap((id) => {
+            const run = store.runs.get(id);
+            return run === null ? [] : [run];
+          }),
+        ],
+        [],
+      ).flatMap((run) => (run.outputRef === null ? [] : allRunCacheRefs(run.outputRef))),
     );
     const sweep = await cache.sweep({
       expiresBefore,

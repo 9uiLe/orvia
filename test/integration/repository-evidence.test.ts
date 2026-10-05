@@ -114,6 +114,74 @@ describe('repository review evidence', () => {
     );
   });
 
+  test('UTF-8 changes stay within the requested byte budget', async () => {
+    const maxBytes = 300;
+    for (const content of [Buffer.from(`${'あ'.repeat(1000)}\n`), Buffer.alloc(1000, 0xff)]) {
+      writeFileSync(join(repo, 'README.md'), content);
+      const changes = await inspector.readChanges(repo, base, maxBytes);
+      const fileBytes = changes.files.reduce(
+        (sum, file) => sum + Buffer.byteLength(JSON.stringify(file)),
+        0,
+      );
+      assert.ok(fileBytes + Buffer.byteLength(changes.diff) <= maxBytes);
+      assert.equal(changes.complete, false);
+      if (content[0] !== 0xff) assert.ok(!changes.diff.includes('\ufffd'));
+    }
+    writeFileSync(join(repo, 'README.md'), 'literal replacement character: \ufffd\n');
+    const valid = await inspector.readChanges(repo, base, 100_000);
+    assert.equal(valid.complete, true);
+    assert.match(valid.diff, /literal replacement character: \ufffd/);
+  });
+
+  test('unchecked tracked paths are listed as incomplete without rewriting Git flags', async () => {
+    for (const flag of ['assume-unchanged', 'skip-worktree']) {
+      git(repo, 'update-index', `--${flag}`, 'README.md');
+      writeFileSync(join(repo, 'README.md'), `hidden by ${flag}\n`);
+      const indexBefore = readFileSync(join(repo, '.git', 'index'));
+      const changes = await inspector.readChanges(repo, base, 100_000);
+      assert.equal(changes.complete, false);
+      assert.deepEqual(changes.files, [{ path: 'README.md', status: 'unchecked' }]);
+      const source = await inspector.readSource(repo, 'README.md', 0, 100, changes.fingerprint);
+      assert.equal(Buffer.from(source.content, 'base64').toString(), `hidden by ${flag}\n`);
+      assert.deepEqual(readFileSync(join(repo, '.git', 'index')), indexBefore);
+      git(repo, 'update-index', `--no-${flag}`, 'README.md');
+      git(repo, 'checkout', '--', 'README.md');
+    }
+  });
+
+  test('executable mode changes remain evidence when Git filemode detection is disabled', async () => {
+    git(repo, 'config', 'core.filemode', 'false');
+    chmodSync(join(repo, 'README.md'), 0o755);
+    const indexBefore = readFileSync(join(repo, '.git', 'index'));
+    const changes = await inspector.readChanges(repo, base, 100_000);
+    assert.equal(changes.complete, true);
+    assert.deepEqual(changes.files, [{ path: 'README.md', status: 'M' }]);
+    assert.match(changes.diff, /old mode 100644\nnew mode 100755/);
+    assert.deepEqual(readFileSync(join(repo, '.git', 'index')), indexBefore);
+    assert.equal(git(repo, 'config', 'core.filemode'), 'false');
+  });
+
+  test('a large byte allowance reads small untracked files without reserving that allowance', async () => {
+    writeFileSync(join(repo, 'small.ts'), 'let x=1;\n');
+    const changes = await inspector.readChanges(repo, base, Number.MAX_SAFE_INTEGER);
+    assert.equal(changes.complete, true);
+    assert.match(changes.diff, /\+let x=1;/);
+  });
+
+  test('legacy review evidence includes untracked content and refuses incomplete binary evidence', async () => {
+    writeFileSync(join(repo, 'new.ts'), 'export const added = true;\n');
+    const changes = await inspector.changes(repo, base, 100_000);
+    assert.equal(changes.complete, true);
+    assert.match(changes.status, /\?\? new\.ts/);
+    assert.match(changes.diff, /\+export const added = true;/);
+    writeFileSync(join(repo, 'raw.bin'), Buffer.from([0, 255, 2]));
+    assert.equal((await inspector.changes(repo, base, 100_000)).complete, false);
+    writeFileSync(join(repo, 'README.md'), `${'あ'.repeat(1000)}\n`);
+    const bounded = await inspector.changes(repo, base, 300);
+    assert.ok(Buffer.byteLength(bounded.status) + Buffer.byteLength(bounded.diff) <= 300);
+    assert.equal(bounded.complete, false);
+  });
+
   test('staged content remains reviewable when worktree content is restored to the base', async () => {
     const original = readFileSync(join(repo, 'README.md'));
     writeFileSync(join(repo, 'README.md'), 'staged-only content\n');

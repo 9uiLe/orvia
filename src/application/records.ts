@@ -94,6 +94,13 @@ export function recordDecision(
           { decisionId: previous.id, planId: target.planId },
         );
       }
+      if (previous.workItemId !== target.workItemId) {
+        throw new OrviaError(
+          'VALIDATION_FAILED',
+          'a decision can only supersede a decision for the same Plan or Work Item target',
+          { decisionId: previous.id, workItemId: target.workItemId },
+        );
+      }
       if (previous.status !== 'accepted') {
         throw new OrviaError(
           'INVALID_STATE_TRANSITION',

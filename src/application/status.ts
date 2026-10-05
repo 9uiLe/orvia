@@ -1,6 +1,6 @@
 import type { Cycle } from '../domain/cycle.ts';
 import type { Checkpoint } from '../domain/checkpoint.ts';
-import type { PlanId, WorkItemId } from '../domain/ids.ts';
+import type { PlanId, RunId, WorkItemId } from '../domain/ids.ts';
 import type { AgentRun } from '../domain/records.ts';
 import type { StorageAssessment } from '../domain/storage.ts';
 import { OPEN_STATUSES, type WorkItemStatus } from '../domain/work-item.ts';
@@ -68,7 +68,10 @@ function summarizeCycle(cycle: Cycle | undefined): OpenWorkItemSummary['cycle'] 
 export async function getStatus(
   deps: Dependencies,
   storage: StorageService,
-  runs: { recoveryStatus(): RecoveryResult },
+  runs: {
+    recoveryStatus(): RecoveryResult;
+    recordingState(runId: RunId | null): 'pending' | 'incomplete';
+  },
 ): Promise<OverallStatus> {
   const { store } = deps;
   const running = new Map(store.runs.listRunning().map((run) => [run.workItemId, run]));
@@ -99,9 +102,7 @@ export async function getStatus(
               recordingState:
                 checkpoint.state !== 'running'
                   ? ('recorded' as const)
-                  : run?.id === checkpoint.runId
-                    ? ('pending' as const)
-                    : ('incomplete' as const),
+                  : runs.recordingState(checkpoint.runId),
             },
     };
   });

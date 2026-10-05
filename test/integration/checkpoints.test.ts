@@ -154,6 +154,23 @@ describe('app-led checkpoints', () => {
     assert.equal(daemon.app.deps.store.workItems.get(item.id)?.status, 'completed');
   });
 
+  test('a paused Work Item can be evaluated without enabling another run and can be explicitly completed', async () => {
+    await confirm();
+    const checkpoint = await prepare();
+    await finish(checkpoint);
+    await call(daemon.app, 'pause_work_item', { workItemId: item.id });
+    await review(checkpoint, 'continue');
+    assert.equal(daemon.app.deps.store.workItems.get(item.id)?.status, 'paused');
+    await rejectsWith(prepare(), 'INVALID_STATE_TRANSITION');
+    await call(daemon.app, 'resume_work_item', { workItemId: item.id });
+    const next = await prepare();
+    await finish(next);
+    await call(daemon.app, 'pause_work_item', { workItemId: item.id });
+    await review(next, 'complete');
+    assert.equal(daemon.app.deps.store.workItems.get(item.id)?.status, 'completed');
+    await rejectsWith(review(next), 'INVALID_STATE_TRANSITION');
+  });
+
   for (const change of [
     'note',
     'decision',

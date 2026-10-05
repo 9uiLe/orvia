@@ -1,28 +1,20 @@
 // Measures the latency of the status queries a human triggers from chat ("what is happening
-// now?"). It reports numbers only; there is no pass/fail threshold (see README "Performance").
+// now?"). It reports numbers only; there is no pass/fail threshold
+// (see docs/current-implementation.md "Performance").
 //
 //   npm run bench -- [--plans N] [--work-items-per-plan N] [--iterations N]
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseArgs } from 'node:util';
 import { invokeOperation } from '../src/application/operations.ts';
 import { validateConfig } from '../src/infrastructure/config.ts';
 import { createLogger } from '../src/infrastructure/logger.ts';
 import { resolvePaths } from '../src/infrastructure/paths.ts';
 import { startDaemon } from '../src/interface/daemon/daemon.ts';
 import { IpcClient } from '../src/interface/ipc-client.ts';
+import { benchmarkOptions } from './benchmark-options.ts';
 
-const { values } = parseArgs({
-  options: {
-    plans: { type: 'string', default: '100' },
-    'work-items-per-plan': { type: 'string', default: '5' },
-    iterations: { type: 'string', default: '500' },
-  },
-});
-const plans = Number(values.plans);
-const perPlan = Number(values['work-items-per-plan']);
-const iterations = Number(values.iterations);
+const { plans, perPlan, iterations } = benchmarkOptions();
 
 const root = mkdtempSync(join(tmpdir(), 'orvia-bench-'));
 const paths = resolvePaths({

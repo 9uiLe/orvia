@@ -458,7 +458,7 @@ export const OPERATIONS: readonly Operation[] = [
     name: 'record_decision',
     title: 'Record decision',
     description:
-      'Record a human decision. To change a decision, pass supersedesDecisionId; the old one is kept as superseded.',
+      'Record a human decision. To change a decision for the same Plan or Work Item target, pass supersedesDecisionId; the old one is kept as superseded.',
     operationClass: 'write',
     input: z.object({
       planId: id('plan', 'Plan id').optional(),

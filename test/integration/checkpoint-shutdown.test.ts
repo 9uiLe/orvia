@@ -3,6 +3,7 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { setImmediate } from 'node:timers/promises';
 import { test } from 'node:test';
+import type { OverallStatus } from '../../src/application/status.ts';
 import type { WorkReport } from '../../src/domain/checkpoint.ts';
 import type { WorkItem } from '../../src/domain/work-item.ts';
 import type { Daemon } from '../../src/interface/daemon/daemon.ts';
@@ -62,6 +63,12 @@ test('daemon shutdown waits for a finished checkpoint report and retains it afte
     await snapshotEntered.promise;
     assert.equal(running.store.runs.get(run.id)?.status, 'succeeded');
     assert.equal(running.app.runs.activeRunCount(), 0);
+    const pending = await call<{ recordingState: string }>(running.app, 'get_checkpoint', {
+      checkpointId: checkpoint.id,
+    });
+    const status = await call<OverallStatus>(running.app, 'get_status');
+    assert.equal(pending.recordingState, 'pending');
+    assert.equal(status.openWorkItems[0]?.checkpoint?.recordingState, 'pending');
     let closed = false;
     closing = running.close().then(() => {
       closed = true;

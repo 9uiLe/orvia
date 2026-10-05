@@ -44,7 +44,7 @@ _Avoid_: 生ログ、人による受け入れ判断
 _Avoid_: 人の判断、実行成功
 
 **Decision（人の判断）**:
-設計や評価について人が採用した方針。変更する場合は以前の判断との関係を残す。
+設計や評価について人が採用した方針。変更する場合は同じ Plan・Work Item を対象とする以前の判断との関係を残す。
 _Avoid_: AI の指摘、終了コード
 
 **Note（文脈・フィードバック）**:
@@ -58,7 +58,7 @@ _Avoid_: 区切り、アプリでの対話レビュー
 
 **Code Snapshot（コード状態）**:
 Orvia が HEAD・index・追跡ファイル・非 ignored の未追跡ファイルから取得する識別情報。
-内容と mode、symlink の参照先名を fingerprint で表し、ソース全文は保存しない。
+内容と mode、symlink の参照先名、Git の検査省略フラグを fingerprint で表し、ソース全文は保存しない。
 _Avoid_: Git status だけの一致、過去ソースのバックアップ
 
 **Change Evidence（変更内容の証跡）**:

@@ -3,27 +3,18 @@
 // only; there is no pass/fail threshold.
 //
 //   npm run bench:storage -- [--plans N] [--work-items-per-plan N] [--iterations N]
-import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseArgs } from 'node:util';
 import { invokeOperation } from '../src/application/operations.ts';
 import { validateConfig } from '../src/infrastructure/config.ts';
 import { createLogger } from '../src/infrastructure/logger.ts';
 import { resolvePaths } from '../src/infrastructure/paths.ts';
 import { startDaemon } from '../src/interface/daemon/daemon.ts';
+import { benchmarkOptions } from './benchmark-options.ts';
+import { startStorageSampler } from './storage-sampler.ts';
 
-const { values } = parseArgs({
-  options: {
-    plans: { type: 'string', default: '100' },
-    'work-items-per-plan': { type: 'string', default: '5' },
-    iterations: { type: 'string', default: '500' },
-  },
-});
-const plans = Number(values.plans);
-const perPlan = Number(values['work-items-per-plan']);
-const iterations = Number(values.iterations);
+const { plans, perPlan, iterations } = benchmarkOptions();
 
 const root = mkdtempSync(join(tmpdir(), 'orvia-bench-'));
 const paths = resolvePaths({
@@ -40,34 +31,6 @@ const paths = resolvePaths({
   uid: process.getuid?.() ?? 0,
 });
 
-/** Polls file sizes from a separate process, because SQLite calls block this event loop. */
-function startSampler(databaseFile: string) {
-  const source = `
-    const { statSync } = require('node:fs');
-    const files = ['', '-wal', '-shm', '-journal'].map((s) => ${JSON.stringify(databaseFile)} + s);
-    const size = (f) => { try { return statSync(f).size; } catch { return 0; } };
-    const peak = { main: 0, wal: 0, shm: 0, journal: 0, total: 0, samples: 0 };
-    setInterval(() => {
-      const [main, wal, shm, journal] = files.map(size);
-      peak.main = Math.max(peak.main, main); peak.wal = Math.max(peak.wal, wal);
-      peak.shm = Math.max(peak.shm, shm); peak.journal = Math.max(peak.journal, journal);
-      peak.total = Math.max(peak.total, main + wal + shm + journal); peak.samples++;
-    }, 1);
-    process.on('SIGTERM', () => { process.stdout.write(JSON.stringify(peak)); process.exit(0); });`;
-  const child = spawn(process.execPath, ['-e', source], { stdio: ['ignore', 'pipe', 'inherit'] });
-  let output = '';
-  child.stdout.on('data', (chunk: Buffer) => (output += chunk.toString()));
-  return {
-    stop: () =>
-      new Promise<Record<string, number>>((resolve) => {
-        child.once('exit', () => {
-          resolve(JSON.parse(output) as Record<string, number>);
-        });
-        child.kill('SIGTERM');
-      }),
-  };
-}
-
 function percentile(sorted: number[], p: number): number {
   return sorted[Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1)] ?? NaN;
 }
@@ -81,6 +44,7 @@ const daemon = await startDaemon({
   logger: createLogger('error'),
   listen: false,
 });
+let sampler: Awaited<ReturnType<typeof startStorageSampler>> | null = null;
 try {
   const app = daemon.app;
   const call = (operation: string, input: Record<string, unknown>) =>
@@ -110,7 +74,7 @@ try {
     ['get_status', () => call('get_status', {})],
   ];
 
-  const sampler = startSampler(paths.databaseFile);
+  sampler = await startStorageSampler(paths.databaseFile);
   const samples = new Map<string, number[]>(operations.map(([name]) => [name, []]));
   const mixedStart = process.hrtime.bigint();
   for (let i = 0; i < iterations; i++) {
@@ -141,6 +105,13 @@ try {
   console.log(`peak bytes         ${JSON.stringify(peak)}`);
   console.log(`final bytes        ${JSON.stringify(finalUsage)}`);
 } finally {
-  await daemon.close();
-  rmSync(root, { recursive: true, force: true });
+  try {
+    await sampler?.stop();
+  } finally {
+    try {
+      await daemon.close();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
 }

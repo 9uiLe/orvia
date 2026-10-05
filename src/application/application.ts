@@ -13,7 +13,7 @@ export class Application {
 
   constructor(deps: Dependencies) {
     this.deps = deps;
-    this.storage = new StorageService(deps);
+    this.storage = new StorageService(deps, () => this.runs.recordingRunIds());
     this.runs = new RunSupervisor(deps, this.storage);
     this.cycles = new CycleSupervisor(deps, this.runs, this.storage);
     this.checkpoints = new CheckpointSupervisor(deps, this.runs);

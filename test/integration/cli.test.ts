@@ -58,6 +58,15 @@ describe('orvia CLI', () => {
     assert.match(result.stderr, /DAEMON_NOT_RUNNING/);
   });
 
+  test('JSON input must be an object before command flags are merged', () => {
+    for (const input of ['null', '[]', '"text"', '{broken']) {
+      const result = orvia('create-plan', '--input', input, '--title', 'From a flag');
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /VALIDATION_FAILED/);
+      assert.match(result.stderr, /JSON object/);
+    }
+  });
+
   test('doctor works without a daemon and does not create a database', () => {
     const result = orvia('doctor', '--json');
     assert.equal(result.status, 0, result.stderr);

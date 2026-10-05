@@ -142,6 +142,54 @@ describe('plans and work items', () => {
     );
   });
 
+  test('superseding a decision keeps its Plan or Work Item target and leaves other targets unchanged', async () => {
+    await call(daemon.app, 'create_plan', { title: 'P' });
+    const firstItem = await createItem('first');
+    const secondItem = await createItem('second');
+    const planDecision = await call<Decision>(daemon.app, 'record_decision', {
+      planId: 'P-1',
+      title: 'Shared constraint',
+      body: 'Applies to all work',
+    });
+    const itemDecision = await call<Decision>(daemon.app, 'record_decision', {
+      workItemId: firstItem.id,
+      title: 'First item constraint',
+      body: 'Applies only to the first item',
+    });
+    for (const [decision, target] of [
+      [planDecision, { workItemId: firstItem.id }],
+      [itemDecision, { workItemId: secondItem.id }],
+      [itemDecision, { planId: 'P-1' }],
+    ] as const) {
+      await rejectsWith(
+        call(daemon.app, 'record_decision', {
+          ...target,
+          title: 'Wrong target',
+          body: 'Should not replace another target',
+          supersedesDecisionId: decision.id,
+        }),
+        'VALIDATION_FAILED',
+      );
+    }
+    const changed = await call<Decision>(daemon.app, 'record_decision', {
+      workItemId: firstItem.id,
+      title: 'Updated first item constraint',
+      body: 'Still applies only to the first item',
+      supersedesDecisionId: itemDecision.id,
+    });
+    const { decisions } = await call<{ decisions: Decision[] }>(daemon.app, 'get_plan', {
+      planId: 'P-1',
+    });
+    assert.deepEqual(
+      decisions.map((d) => [d.id, d.workItemId, d.status, d.supersedesId]),
+      [
+        [planDecision.id, null, 'accepted', null],
+        [itemDecision.id, firstItem.id, 'superseded', null],
+        [changed.id, firstItem.id, 'accepted', itemDecision.id],
+      ],
+    );
+  });
+
   for (const closing of ['complete_work_item', 'archive_work_item'] as const) {
     test(`when the work item is ${closing === 'complete_work_item' ? 'completed' : 'archived'}, changes to it are refused`, async () => {
       await call(daemon.app, 'create_plan', { title: 'P' });

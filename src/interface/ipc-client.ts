@@ -5,6 +5,7 @@ import {
   OPERATION_PATH_PREFIX,
   type HealthInfo,
   type WireResponse,
+  decodeWireResponse,
 } from './ipc-protocol.ts';
 
 /** Talks to the daemon over its local socket. Clients never open the database themselves. */
@@ -36,12 +37,19 @@ export class IpcClient {
         (res) => {
           const chunks: Buffer[] = [];
           res.on('data', (chunk: Buffer) => chunks.push(chunk));
+          res.on('error', () => {
+            reject(new OrviaError('INTERNAL', 'daemon response was interrupted'));
+          });
           res.on('end', () => {
             let parsed: WireResponse;
             try {
-              parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')) as WireResponse;
-            } catch {
-              reject(new OrviaError('INTERNAL', 'daemon returned an invalid response'));
+              parsed = decodeWireResponse(Buffer.concat(chunks).toString('utf8'));
+            } catch (error) {
+              reject(
+                error instanceof Error
+                  ? error
+                  : new OrviaError('INTERNAL', 'daemon returned an invalid response'),
+              );
               return;
             }
             if (parsed.ok) resolve(parsed.result);

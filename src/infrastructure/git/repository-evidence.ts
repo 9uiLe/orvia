@@ -8,6 +8,7 @@ import type {
   SourcePage,
   WorkspaceChanges,
 } from '../../domain/repository-evidence.ts';
+import type { ChangeEvidence } from '../../application/ports.ts';
 import { OrviaError } from '../../domain/errors.ts';
 import type { GitCli } from './git-cli.ts';
 
@@ -19,9 +20,14 @@ interface Context {
 interface Metadata {
   head: string;
   index: string;
+  flags: string;
   tree: string;
   untracked: readonly string[];
   records: ReadonlyMap<string, readonly string[]>;
+}
+
+function diffArguments(args: readonly string[]): readonly string[] {
+  return ['-c', 'core.filemode=true', 'diff', ...args];
 }
 
 function digest(value: string): string {
@@ -51,6 +57,12 @@ function nulRecords(output: string): string[] {
     throw new OrviaError('VALIDATION_FAILED', 'git returned incomplete or unsupported path data');
   }
   return output.slice(0, -1).split('\0');
+}
+
+function uncheckedEntries(flags: string): readonly { path: string; flag: string }[] {
+  return nulRecords(flags)
+    .filter((record) => record[0] === 'S' || record[0] !== record[0]?.toUpperCase())
+    .map((record) => ({ path: record.slice(2), flag: record.slice(0, 1) }));
 }
 
 export class RepositoryEvidence {
@@ -97,6 +109,7 @@ export class RepositoryEvidence {
   async #metadata(context: Context): Promise<Metadata> {
     const head = (await this.#command(context.root, ['rev-parse', '--verify', 'HEAD'])).trim();
     const index = await this.#command(context.root, ['ls-files', '--stage', '-z']);
+    const flags = await this.#command(context.root, ['ls-files', '-v', '-z']);
     const tree = await this.#command(context.root, ['ls-tree', '-r', '-z', head]);
     const untracked = nulRecords(
       await this.#command(context.root, ['ls-files', '--others', '--exclude-standard', '-z']),
@@ -120,8 +133,11 @@ export class RepositoryEvidence {
         records.set(path, values);
       }
     }
+    for (const { path, flag } of uncheckedEntries(flags)) {
+      records.get(path)?.push(`flags:${flag}`);
+    }
     for (const path of untracked) if (!records.has(path)) records.set(path, []);
-    return { head, index, tree, untracked, records };
+    return { head, index, flags, tree, untracked, records };
   }
 
   #assertPath(context: Context, path: string): void {
@@ -235,6 +251,7 @@ export class RepositoryEvidence {
     if (
       metadata.head !== after.head ||
       metadata.index !== after.index ||
+      metadata.flags !== after.flags ||
       metadata.tree !== after.tree ||
       JSON.stringify(metadata.untracked) !== JSON.stringify(after.untracked)
     )
@@ -326,6 +343,42 @@ export class RepositoryEvidence {
   ): Promise<WorkspaceChanges> {
     const before = await this.snapshot(root);
     expectSnapshot(before, expected);
+    const evidence = await this.#changes(root, baseCommit, maxBytes, before.head);
+    sameSnapshot(before, await this.snapshot(root));
+    return {
+      ...evidence,
+      fingerprint: before.fingerprint,
+      observedAt: new Date().toISOString(),
+    };
+  }
+
+  async legacyChanges(root: string, baseCommit: string, maxBytes: number): Promise<ChangeEvidence> {
+    const head = await this.#git.run(root, ['rev-parse', '--verify', '--quiet', 'HEAD']);
+    const status = await this.#git.run(
+      root,
+      ['status', '--porcelain=v1', '--untracked-files=all'],
+      maxBytes,
+    );
+    if (status.exitCode !== 0)
+      throw new OrviaError('VALIDATION_FAILED', 'git status failed in the bound worktree', {
+        worktreeRoot: root,
+      });
+    const remaining = maxBytes - Buffer.byteLength(status.stdout);
+    const currentHead = head.exitCode === 0 ? head.stdout.trim() : null;
+    const evidence =
+      status.truncated || remaining <= 0 || currentHead === null
+        ? null
+        : await this.#changes(root, baseCommit, remaining, currentHead);
+    return {
+      baseCommit,
+      head: currentHead,
+      status: status.stdout,
+      diff: evidence?.diff ?? '',
+      complete: evidence?.complete ?? false,
+    };
+  }
+
+  async #changes(root: string, baseCommit: string, maxBytes: number, head: string) {
     const resolved = (
       await this.#command(root, [
         'rev-parse',
@@ -335,7 +388,10 @@ export class RepositoryEvidence {
       ])
     ).trim();
     const names = nulRecords(
-      await this.#command(root, ['diff', '--name-status', '--no-renames', '-z', resolved, '--']),
+      await this.#command(
+        root,
+        diffArguments(['--name-status', '--no-renames', '-z', resolved, '--']),
+      ),
     );
     const allFiles: { path: string; status: string }[] = [];
     for (let index = 0; index < names.length; index += 2) {
@@ -346,15 +402,10 @@ export class RepositoryEvidence {
       allFiles.push({ path, status });
     }
     const stagedNames = nulRecords(
-      await this.#command(root, [
-        'diff',
-        '--cached',
-        '--name-status',
-        '--no-renames',
-        '-z',
-        before.head,
-        '--',
-      ]),
+      await this.#command(
+        root,
+        diffArguments(['--cached', '--name-status', '--no-renames', '-z', head, '--']),
+      ),
     );
     for (let index = 0; index < stagedNames.length; index += 2) {
       const status = stagedNames[index];
@@ -368,9 +419,15 @@ export class RepositoryEvidence {
       await this.#command(root, ['ls-files', '--others', '--exclude-standard', '-z']),
     );
     for (const path of untracked) allFiles.push({ path, status: '??' });
+    const unchecked = uncheckedEntries(await this.#command(root, ['ls-files', '-v', '-z']));
+    for (const { path } of unchecked) {
+      const file = allFiles.find((file) => file.path === path);
+      if (file === undefined) allFiles.push({ path, status: 'unchecked' });
+      else file.status = 'unchecked';
+    }
     allFiles.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
     let remaining = maxBytes;
-    let complete = true;
+    let complete = unchecked.length === 0;
     const files = [];
     for (const file of allFiles) {
       const size = Buffer.byteLength(JSON.stringify(file));
@@ -385,7 +442,7 @@ export class RepositoryEvidence {
       remaining > 0
         ? await this.#git.run(
             root,
-            ['diff', '--no-color', '--no-ext-diff', '--no-textconv', resolved, '--'],
+            diffArguments(['--no-color', '--no-ext-diff', '--no-textconv', resolved, '--']),
             remaining,
           )
         : null;
@@ -401,7 +458,7 @@ export class RepositoryEvidence {
       else {
         const staged = await this.#git.run(
           root,
-          ['diff', '--cached', '--no-color', '--no-ext-diff', '--no-textconv', before.head, '--'],
+          diffArguments(['--cached', '--no-color', '--no-ext-diff', '--no-textconv', head, '--']),
           remaining,
         );
         if (staged.exitCode !== 0)
@@ -425,11 +482,12 @@ export class RepositoryEvidence {
       } else {
         const handle = await this.#open(context, path);
         try {
-          if ((await handle.stat()).size > remaining) {
+          const size = (await handle.stat()).size;
+          if (size > remaining) {
             complete = false;
             continue;
           }
-          const buffer = Buffer.alloc(remaining + 1);
+          const buffer = Buffer.alloc(size + 1);
           let received = 0;
           while (received < buffer.length) {
             const read = await handle.read(buffer, received, buffer.length - received, received);
@@ -472,12 +530,9 @@ export class RepositoryEvidence {
       diff += patch;
       remaining -= Buffer.byteLength(patch);
     }
-    sameSnapshot(before, await this.snapshot(root));
     return {
       baseCommit: resolved,
-      head: before.head,
-      fingerprint: before.fingerprint,
-      observedAt: new Date().toISOString(),
+      head,
       files,
       diff,
       complete,

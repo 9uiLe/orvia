@@ -310,7 +310,17 @@ export class RunSupervisor implements RunControl {
         reserveBytes: schema.byteLength,
       });
       schemaWriter.write(schema);
-      await schemaWriter.close();
+      const schemaOutput = await schemaWriter.close();
+      if (
+        schemaOutput.failed ||
+        schemaOutput.truncated ||
+        schemaOutput.bytes !== schema.byteLength
+      ) {
+        throw new OrviaError(
+          'RESULT_STORAGE_EXHAUSTED',
+          'the result schema could not be stored completely; the agent was not started',
+        );
+      }
       result = { schema: resultSchema, schemaPath: deps.cache.absolutePath(schemaRef) };
       await input.validate?.();
       inserted = recordRun();
@@ -339,31 +349,36 @@ export class RunSupervisor implements RunControl {
       });
     } catch (error) {
       // Synchronous, so the run is never left `running` without a process to stop.
-      try {
-        deps.store.transaction(
-          () =>
-            deps.store.runs.finish(run.id, {
-              status: 'failed',
-              exitCode: null,
-              outputBytes: 0,
-              outputTruncated: false,
-              now: nowIso(deps),
-            }),
-          'reserve',
-        );
-      } catch (finishError) {
-        deps.logger.error('could not record a run that failed to start', {
-          runId: run.id,
-          error: finishError instanceof Error ? finishError.message : String(finishError),
-        });
-      }
-      await writer?.close();
-      await resultWriter.close();
-      await deps.cache.remove([refs.result, refs.schema]);
-      const failed = deps.store.runs.get(run.id);
-      if (failed !== null && input.kind === 'manual') {
-        for (const listener of this.#listeners) await listener(failed, { kind: 'none' });
-      }
+      await this.#trackRecording(
+        run.id,
+        (async () => {
+          try {
+            deps.store.transaction(
+              () =>
+                deps.store.runs.finish(run.id, {
+                  status: 'failed',
+                  exitCode: null,
+                  outputBytes: 0,
+                  outputTruncated: false,
+                  now: nowIso(deps),
+                }),
+              'reserve',
+            );
+          } catch (finishError) {
+            deps.logger.error('could not record a run that failed to start', {
+              runId: run.id,
+              error: finishError instanceof Error ? finishError.message : String(finishError),
+            });
+          }
+          await writer?.close();
+          await resultWriter.close();
+          await deps.cache.remove([refs.result, refs.schema]);
+          const failed = deps.store.runs.get(run.id);
+          if (failed !== null && input.kind === 'manual') {
+            for (const listener of this.#listeners) await listener(failed, { kind: 'none' });
+          }
+        })(),
+      );
       throw error;
     }
     const logWriter = writer;
@@ -375,63 +390,64 @@ export class RunSupervisor implements RunControl {
       profileId: profile.id,
     });
 
-    const recorded = process.exited
-      .then(async (exit) => {
-        const output = await logWriter.close();
-        const resultOutput = await resultWriter.close();
-        const status =
-          active.stopReason ??
-          (exit.exitCode === 0 && exit.leftoverError === null ? 'succeeded' : 'failed');
-        deps.store.transaction(
-          () =>
-            deps.store.runs.finish(run.id, {
-              status,
-              exitCode: exit.exitCode,
-              outputBytes: output.bytes,
-              outputTruncated: output.truncated,
-              now: nowIso(deps),
-            }),
-          'reserve',
-        );
-        if (exit.leftoverError !== null) {
-          deps.logger.error('processes left by the agent could not be stopped', {
-            runId: run.id,
-            error: exit.leftoverError,
-          });
-        }
-        deps.logger.info('agent run finished', {
-          runId: run.id,
-          status,
-          exitCode: exit.exitCode,
-          spawnError: exit.spawnError,
-        });
-        this.#forget(item.id, run.id);
-        const finished = deps.store.runs.get(run.id);
-        if (this.#listeners.length > 0 && finished !== null) {
-          const stageOutput = await this.#stageOutput(
-            profile.adapter,
-            resultRef,
-            resultBytes,
-            resultOutput,
+    const recorded = this.#trackRecording(
+      run.id,
+      process.exited
+        .then(async (exit) => {
+          const output = await logWriter.close();
+          const resultOutput = await resultWriter.close();
+          const status =
+            active.stopReason ??
+            (exit.exitCode === 0 && exit.leftoverError === null ? 'succeeded' : 'failed');
+          deps.store.transaction(
+            () =>
+              deps.store.runs.finish(run.id, {
+                status,
+                exitCode: exit.exitCode,
+                outputBytes: output.bytes,
+                outputTruncated: output.truncated,
+                now: nowIso(deps),
+              }),
+            'reserve',
           );
-          for (const listener of this.#listeners) await listener(finished, stageOutput);
-        } else if (this.#listeners.length === 0 && cycleId !== null) {
-          deps.logger.error('the result of a cycle run was dropped: no listener', {
+          if (exit.leftoverError !== null) {
+            deps.logger.error('processes left by the agent could not be stopped', {
+              runId: run.id,
+              error: exit.leftoverError,
+            });
+          }
+          deps.logger.info('agent run finished', {
             runId: run.id,
+            status,
+            exitCode: exit.exitCode,
+            spawnError: exit.spawnError,
           });
-        }
-      })
-      .catch((error: unknown) => {
-        deps.logger.error('failed to record agent run result', {
-          runId: run.id,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      })
-      .finally(() => {
-        this.#forget(item.id, run.id);
-        this.#recorded.delete(run.id);
-      });
-    this.#recorded.set(run.id, recorded);
+          this.#forget(item.id, run.id);
+          const finished = deps.store.runs.get(run.id);
+          if (this.#listeners.length > 0 && finished !== null) {
+            const stageOutput = await this.#stageOutput(
+              profile.adapter,
+              resultRef,
+              resultBytes,
+              resultOutput,
+            );
+            for (const listener of this.#listeners) await listener(finished, stageOutput);
+          } else if (this.#listeners.length === 0 && cycleId !== null) {
+            deps.logger.error('the result of a cycle run was dropped: no listener', {
+              runId: run.id,
+            });
+          }
+        })
+        .catch((error: unknown) => {
+          deps.logger.error('failed to record agent run result', {
+            runId: run.id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        })
+        .finally(() => {
+          this.#forget(item.id, run.id);
+        }),
+    );
     recorded
       .then(() => (this.#closing ? null : this.#storage.cleanupIfNeeded()))
       .catch((error: unknown) => {
@@ -469,6 +485,23 @@ export class RunSupervisor implements RunControl {
   /** Resolves when the run's final state has been committed (or immediately if unknown). */
   async waitForRun(runId: RunId): Promise<void> {
     await this.#recorded.get(runId);
+  }
+
+  recordingState(runId: RunId | null): 'pending' | 'incomplete' {
+    return runId !== null &&
+      (this.#recorded.has(runId) || this.#deps.store.runs.get(runId)?.status === 'running')
+      ? 'pending'
+      : 'incomplete';
+  }
+
+  recordingRunIds(): readonly RunId[] {
+    return [...this.#recorded.keys()];
+  }
+
+  #trackRecording(runId: RunId, recording: Promise<void>): Promise<void> {
+    const tracked = recording.finally(() => this.#recorded.delete(runId));
+    this.#recorded.set(runId, tracked);
+    return tracked;
   }
 
   activeRunCount(): number {

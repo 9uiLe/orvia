@@ -66,6 +66,22 @@ Before 1.0.0, minor versions may contain breaking changes.
 
 ### Fixed
 
+- Git evidence no longer hides executable mode changes when `core.filemode=false` or marks
+  `assume-unchanged` / `skip-worktree` entries as complete. UTF-8 output obeys the requested
+  byte budget, invalid text is marked partial, and untracked reads allocate by file size.
+  Legacy review evidence includes untracked text and rejects incomplete evidence.
+- Checkpoint/status views distinguish pending report persistence from failed persistence.
+  Cleanup protects pending reports and their output even after the agent exits.
+- Result schema write failures prevent agent launch; cache close errors are retained.
+- Decisions cannot supersede a different Plan/Work Item target. Finished checkpoints can be
+  reviewed while paused; continuing execution still requires explicit resume.
+- Migration history with missing versions is rejected before mutation. Executable directories
+  are no longer reported as available agent commands.
+- Invalid CLI JSON input returns `VALIDATION_FAILED`. Malformed or interrupted IPC responses
+  return `INTERNAL` instead of causing an uncaught exception or leaving a call pending.
+- Benchmark workload counts reject invalid values before setup. The storage sampler is ready
+  before measurement and is stopped and drained on both success and failure.
+
 - The cache stays within `storage.cache_max_mb` while agents write: measuring the cache during a
   run no longer releases bytes that open writers have already taken.
 - A stage's structured result has its cache space reserved before the agent starts, and Orvia

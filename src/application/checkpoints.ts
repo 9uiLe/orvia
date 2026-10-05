@@ -5,7 +5,11 @@ import type { CheckpointId, PlanId, WorkItemId } from '../domain/ids.ts';
 import { assertPlanAcceptsChanges } from '../domain/plan.ts';
 import type { AgentRun } from '../domain/records.ts';
 import type { CodeSnapshot } from '../domain/repository-evidence.ts';
-import { assertWorkItemCanRun, requireBoundWorkspace } from '../domain/work-item.ts';
+import {
+  assertWorkItemAcceptsChanges,
+  assertWorkItemCanRun,
+  requireBoundWorkspace,
+} from '../domain/work-item.ts';
 import { assertWorkspaceMatches } from '../domain/workspace.ts';
 import { assertCheckpointProfile, requireProfile } from './agent-profiles.ts';
 import { parseWorkReport, resultJsonSchema, ResultProtocolError } from './agent-results.ts';
@@ -192,11 +196,7 @@ export class CheckpointSupervisor {
       design: this.#deps.store.designRevisions.get(checkpoint.designRevisionId),
       run,
       recordingState:
-        checkpoint.state !== 'running'
-          ? 'recorded'
-          : run?.status === 'running'
-            ? 'pending'
-            : 'incomplete',
+        checkpoint.state !== 'running' ? 'recorded' : this.#runs.recordingState(checkpoint.runId),
       decisions: checkpoint.reviews.map((r) => this.#deps.store.decisions.get(r.decisionId)),
       verificationSource: 'agent_reported',
       changedFiles:
@@ -305,7 +305,7 @@ export class CheckpointSupervisor {
     return this.#deps.store.transaction(() => {
       const checkpoint = this.require(input.checkpointId);
       const item = requireWorkItem(this.#deps, checkpoint.workItemId);
-      assertWorkItemCanRun(item);
+      assertWorkItemAcceptsChanges(item);
       if (
         !['awaiting_review', 'reviewed'].includes(checkpoint.state) ||
         this.#deps.store.checkpoints.latestDispatched(item.id)?.id !== checkpoint.id ||

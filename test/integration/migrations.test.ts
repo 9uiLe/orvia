@@ -391,6 +391,21 @@ describe('database migrations', () => {
     assert.throws(() => open([edited]), { code: 'MIGRATION_CHECKSUM_MISMATCH' });
   });
 
+  for (const missingVersion of [1, 2]) {
+    test(`missing applied migration v${missingVersion} is rejected without changing the database`, () => {
+      open([v1, v2, v3]).db.close();
+      const db = new DatabaseSync(env.paths.databaseFile);
+      db.prepare('DELETE FROM orvia_schema_migrations WHERE version = ?').run(missingVersion);
+      db.close();
+      const before = sha256(env.paths.databaseFile);
+      const beforeBackups = backups();
+
+      assert.throws(() => open([v1, v2, v3]), { code: 'DATABASE_INTEGRITY_FAILED' });
+      assert.equal(sha256(env.paths.databaseFile), before);
+      assert.deepEqual(backups(), beforeBackups);
+    });
+  }
+
   test('a database file that Orvia did not create is rejected', () => {
     const foreign = new DatabaseSync(env.paths.databaseFile);
     foreign.exec('CREATE TABLE something (x)');

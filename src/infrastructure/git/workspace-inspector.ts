@@ -143,38 +143,6 @@ export class GitWorkspaceInspector implements GitInspector {
     baseCommit: string,
     maxBytes: number,
   ): Promise<ChangeEvidence> {
-    const head = await this.#git.run(worktreeRoot, ['rev-parse', '--verify', '--quiet', 'HEAD']);
-    const status = await this.#git.run(
-      worktreeRoot,
-      ['status', '--porcelain=v1', '--untracked-files=all'],
-      maxBytes,
-    );
-    if (status.exitCode !== 0) {
-      throw new OrviaError('VALIDATION_FAILED', 'git status failed in the bound worktree', {
-        worktreeRoot,
-      });
-    }
-    const remaining = maxBytes - Buffer.byteLength(status.stdout);
-    const diff =
-      status.truncated || remaining <= 0
-        ? null
-        : await this.#git.run(
-            worktreeRoot,
-            ['diff', '--no-color', '--no-ext-diff', '--no-textconv', baseCommit, '--'],
-            remaining,
-          );
-    if (diff !== null && diff.exitCode !== 0) {
-      throw new OrviaError('VALIDATION_FAILED', 'git diff failed in the bound worktree', {
-        worktreeRoot,
-        baseCommit,
-      });
-    }
-    return {
-      baseCommit,
-      head: head.exitCode === 0 ? head.stdout.trim() : null,
-      status: status.stdout,
-      diff: diff?.stdout ?? '',
-      complete: diff !== null && !diff.truncated,
-    };
+    return new RepositoryEvidence(this.#git).legacyChanges(worktreeRoot, baseCommit, maxBytes);
   }
 }
