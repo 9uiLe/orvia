@@ -484,7 +484,7 @@ describe('storage contract: database_max_mb is never exceeded', () => {
     );
     const owner = d.app.deps.store.runs.get(stillRunning as `R-${number}`)?.workItemId;
     const refused = await rejectsWith(
-      call(d.app, 'start_run', { workItemId: owner, profileId: 'fake', instructions: 'go' }),
+      call(d.app, 'start_run', { checkpointId: 'K-404' }),
       'RECOVERY_INCOMPLETE',
     );
     assert.match(refused.message, /storage\.database_max_mb/);

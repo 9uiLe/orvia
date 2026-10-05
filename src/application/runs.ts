@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { isOrviaError, OrviaError } from '../domain/errors.ts';
-import type { CycleId, RunId, WorkItemId } from '../domain/ids.ts';
+import type { CheckpointId, CycleId, RunId, WorkItemId } from '../domain/ids.ts';
 import { requiredCapabilitiesFor } from '../domain/agent-profile.ts';
 import type { StageState } from '../domain/cycle.ts';
 import type { AgentRun, RunPurpose } from '../domain/records.ts';
@@ -11,7 +11,12 @@ import { assertWorkspaceMatches, compareWorkspace } from '../domain/workspace.ts
 import { nowIso, type Dependencies } from './dependencies.ts';
 import { requirePlan } from './plans.ts';
 import { MAX_RESULT_BYTES, resultJsonSchema, type ResultPurpose } from './agent-results.ts';
-import { assertCapable, assertCommandAvailable, requireProfile } from './agent-profiles.ts';
+import {
+  assertCapable,
+  assertCheckpointProfile,
+  assertCommandAvailable,
+  requireProfile,
+} from './agent-profiles.ts';
 import type { AgentAdapter, AgentRunRequest, OutputWriter, RunningProcess } from './ports.ts';
 import { composeAgentPrompt } from './prompt.ts';
 import { runCacheRefs, type StorageService } from './storage.ts';
@@ -43,10 +48,12 @@ export type StartRunInput = {
   readonly instructions: string;
   /** Runs inside the transaction that records the run, before the agent starts. */
   readonly withinTransaction?: (run: AgentRun) => void;
+  readonly validate?: () => Promise<void>;
+  readonly validateRecords?: () => void;
 } & (
   | {
-      /** A human-started run: the profile's own capabilities, no structured result. */
       readonly kind: 'manual';
+      readonly checkpointId: CheckpointId;
     }
   | {
       /**
@@ -115,7 +122,7 @@ export class RunSupervisor implements RunControl {
   readonly #deps: Dependencies;
   readonly #storage: StorageService;
   readonly #active = new Map<WorkItemId, ActiveRun>();
-  /** Resolves once a run's final state is committed. */
+  /** Resolves once a run's final state and its finish listeners are recorded. */
   readonly #recorded = new Map<RunId, Promise<void>>();
   /** Work Items whose agents are being stopped; no new run may start for them meanwhile. */
   readonly #stopping = new Set<WorkItemId>();
@@ -129,7 +136,7 @@ export class RunSupervisor implements RunControl {
 
   /**
    * Marks runs left `running` by a previous daemon process as interrupted, one run per
-   * transaction: control transactions must stay one-row changes (ADR 0009), and recovery needs
+   * transaction: control transactions must stay one-row changes, and recovery needs
    * no atomicity across runs. Runs already marked stay marked, so a later recovery only handles
    * the runs still `running`.
    *
@@ -174,19 +181,23 @@ export class RunSupervisor implements RunControl {
    * was started with a result schema. Awaited before the run counts as recorded, so shutdown
    * sees its effects.
    */
-  #onFinished: ((run: AgentRun, output: StageOutput) => Promise<void>) | null = null;
+  readonly #listeners: ((run: AgentRun, output: StageOutput) => Promise<void>)[] = [];
 
   onFinished(listener: (run: AgentRun, output: StageOutput) => Promise<void>): void {
-    if (this.#onFinished !== null)
-      throw new OrviaError('INTERNAL', 'a run listener is already set');
-    this.#onFinished = listener;
+    this.#listeners.push(listener);
+  }
+
+  assertAvailable(workItemId: WorkItemId): void {
+    if (this.#closing)
+      throw new OrviaError('INVALID_STATE_TRANSITION', 'the daemon is shutting down');
+    this.#assertNotStopping(workItemId);
   }
 
   async start(input: StartRunInput): Promise<AgentRun> {
     const deps = this.#deps;
     const stage = input.kind === 'cycleStage' ? input.stage : undefined;
     const purpose = stage === undefined ? 'manual' : STAGE_PURPOSE[stage];
-    const resultSchema = stage === undefined ? undefined : resultJsonSchema(STAGE_PURPOSE[stage]);
+    const resultSchema = resultJsonSchema(stage === undefined ? 'manual' : STAGE_PURPOSE[stage]);
     const cycleId = input.kind === 'cycleStage' ? input.cycleId : null;
     if (this.#closing) {
       throw new OrviaError('INVALID_STATE_TRANSITION', 'the daemon is shutting down');
@@ -207,18 +218,16 @@ export class RunSupervisor implements RunControl {
     const workspace = requireBoundWorkspace(item);
     const profile = requireProfile(deps.profiles, input.profileId);
     if (stage !== undefined) assertCapable(profile, stage);
-    const granted =
-      stage === undefined
-        ? profile.capabilities.filter((capability) => capability !== 'structuredResult')
-        : requiredCapabilitiesFor(stage);
+    else assertCheckpointProfile(profile);
+    const granted = stage === undefined ? profile.capabilities : requiredCapabilitiesFor(stage);
     await assertCommandAvailable(profile, deps.launcher);
 
     assertWorkspaceMatches(item.id, workspace, await deps.git.observe(workspace.worktreeRoot));
 
     const refs = runCacheRefs(`runs/${randomUUID()}.log`);
     const outputRef = refs.log;
-    const resultRef = resultSchema === undefined ? null : refs.result;
-    const schemaRef = resultSchema === undefined ? null : refs.schema;
+    const resultRef = refs.result;
+    const schemaRef = refs.schema;
     // One byte past what the adapter needs, so an oversized result is seen as oversized.
     const resultBytes = profile.adapter.resultStdoutBytes(MAX_RESULT_BYTES) + 1;
     const recordRun = () =>
@@ -230,6 +239,7 @@ export class RunSupervisor implements RunControl {
         this.#assertNotStopping(fresh.id);
         assertWorkItemCanRun(fresh);
         assertNoCycleForManualRun();
+        input.validateRecords?.();
         if (fresh.workspace === null || compareWorkspace(workspace, fresh.workspace).length > 0) {
           throw new OrviaError('WORKSPACE_MISMATCH', `work item ${item.id} was rebound`, {
             workItemId: item.id,
@@ -237,6 +247,25 @@ export class RunSupervisor implements RunControl {
           });
         }
         const plan = requirePlan(deps, fresh.planId);
+        const checkpoint =
+          input.kind === 'manual' ? deps.store.checkpoints.get(input.checkpointId) : null;
+        if (
+          input.kind === 'manual' &&
+          (checkpoint === null ||
+            checkpoint.workItemId !== fresh.id ||
+            checkpoint.profileId !== profile.id)
+        ) {
+          throw new OrviaError(
+            'PROMPT_REQUIRED',
+            'a prepared prompt for this Work Item and Profile is required',
+          );
+        }
+        if (checkpoint !== null && checkpoint.state !== 'prepared') {
+          throw new OrviaError(
+            'PROMPT_ALREADY_DISPATCHED',
+            'the prepared prompt has already been consumed',
+          );
+        }
         return {
           run: (() => {
             const inserted = deps.store.runs.insert({
@@ -248,36 +277,52 @@ export class RunSupervisor implements RunControl {
               now: nowIso(deps),
             });
             input.withinTransaction?.(inserted);
+            if (checkpoint !== null)
+              deps.store.checkpoints.update(checkpoint.id, {
+                state: 'running',
+                runId: inserted.id,
+                runStatus: 'running',
+              });
             return inserted;
           })(),
-          prompt: composeAgentPrompt({
-            plan,
-            workItem: fresh,
-            workspace,
-            decisions: deps.store.decisions.listForPlan(plan.id),
-            notes: deps.store.notes.listForPlan(plan.id),
-            instructions: input.instructions,
-          }),
+          prompt:
+            checkpoint?.prompt ??
+            composeAgentPrompt({
+              plan,
+              workItem: fresh,
+              workspace,
+              decisions: deps.store.decisions.listForPlan(plan.id),
+              notes: deps.store.notes.listForPlan(plan.id),
+              instructions: input.instructions,
+            }),
         };
       });
     // Written before the run is recorded: from the insert until the process is tracked in
     // #active there must be no await, or a pause in between would miss the process.
-    let result: AgentRunRequest['result'] = null;
+    let result: NonNullable<AgentRunRequest['result']>;
     let resultWriter: OutputWriter | null = null;
     let inserted: ReturnType<typeof recordRun>;
     try {
-      if (resultSchema !== undefined && schemaRef !== null && resultRef !== null) {
-        // The result's space is set aside before the agent starts, so verbose logging cannot
-        // crowd out the structured result the cycle depends on.
-        resultWriter = deps.cache.createWriter(resultRef, { reserveBytes: resultBytes });
-        const schema = new TextEncoder().encode(JSON.stringify(resultSchema));
-        const schemaWriter = deps.cache.createWriter(schemaRef, {
-          reserveBytes: schema.byteLength,
-        });
-        schemaWriter.write(schema);
-        await schemaWriter.close();
-        result = { schema: resultSchema, schemaPath: deps.cache.absolutePath(schemaRef) };
+      // Reserve the report before logs can consume the bounded cache.
+      resultWriter = deps.cache.createWriter(resultRef, { reserveBytes: resultBytes });
+      const schema = new TextEncoder().encode(JSON.stringify(resultSchema));
+      const schemaWriter = deps.cache.createWriter(schemaRef, {
+        reserveBytes: schema.byteLength,
+      });
+      schemaWriter.write(schema);
+      const schemaOutput = await schemaWriter.close();
+      if (
+        schemaOutput.failed ||
+        schemaOutput.truncated ||
+        schemaOutput.bytes !== schema.byteLength
+      ) {
+        throw new OrviaError(
+          'RESULT_STORAGE_EXHAUSTED',
+          'the result schema could not be stored completely; the agent was not started',
+        );
       }
+      result = { schema: resultSchema, schemaPath: deps.cache.absolutePath(schemaRef) };
+      await input.validate?.();
       inserted = recordRun();
     } catch (error) {
       await resultWriter?.close();
@@ -300,31 +345,40 @@ export class RunSupervisor implements RunControl {
       writer = logWriter;
       process = deps.launcher.launch(invocation, (chunk, stream) => {
         logWriter.write(chunk);
-        if (stream === 'stdout') resultWriter?.write(chunk);
+        if (stream === 'stdout') resultWriter.write(chunk);
       });
     } catch (error) {
       // Synchronous, so the run is never left `running` without a process to stop.
-      try {
-        deps.store.transaction(
-          () =>
-            deps.store.runs.finish(run.id, {
-              status: 'failed',
-              exitCode: null,
-              outputBytes: 0,
-              outputTruncated: false,
-              now: nowIso(deps),
-            }),
-          'reserve',
-        );
-      } catch (finishError) {
-        deps.logger.error('could not record a run that failed to start', {
-          runId: run.id,
-          error: finishError instanceof Error ? finishError.message : String(finishError),
-        });
-      }
-      await writer?.close();
-      await resultWriter?.close();
-      await deps.cache.remove([refs.result, refs.schema]);
+      await this.#trackRecording(
+        run.id,
+        (async () => {
+          try {
+            deps.store.transaction(
+              () =>
+                deps.store.runs.finish(run.id, {
+                  status: 'failed',
+                  exitCode: null,
+                  outputBytes: 0,
+                  outputTruncated: false,
+                  now: nowIso(deps),
+                }),
+              'reserve',
+            );
+          } catch (finishError) {
+            deps.logger.error('could not record a run that failed to start', {
+              runId: run.id,
+              error: finishError instanceof Error ? finishError.message : String(finishError),
+            });
+          }
+          await writer?.close();
+          await resultWriter.close();
+          await deps.cache.remove([refs.result, refs.schema]);
+          const failed = deps.store.runs.get(run.id);
+          if (failed !== null && input.kind === 'manual') {
+            for (const listener of this.#listeners) await listener(failed, { kind: 'none' });
+          }
+        })(),
+      );
       throw error;
     }
     const logWriter = writer;
@@ -336,62 +390,65 @@ export class RunSupervisor implements RunControl {
       profileId: profile.id,
     });
 
-    const recorded = process.exited
-      .then(async (exit) => {
-        const output = await logWriter.close();
-        const resultOutput = (await resultWriter?.close()) ?? null;
-        const status =
-          active.stopReason ??
-          (exit.exitCode === 0 && exit.leftoverError === null ? 'succeeded' : 'failed');
-        deps.store.transaction(
-          () =>
-            deps.store.runs.finish(run.id, {
-              status,
-              exitCode: exit.exitCode,
-              outputBytes: output.bytes,
-              outputTruncated: output.truncated,
-              now: nowIso(deps),
-            }),
-          'reserve',
-        );
-        if (exit.leftoverError !== null) {
-          deps.logger.error('processes left by the agent could not be stopped', {
-            runId: run.id,
-            error: exit.leftoverError,
-          });
-        }
-        deps.logger.info('agent run finished', {
-          runId: run.id,
-          status,
-          exitCode: exit.exitCode,
-          spawnError: exit.spawnError,
-        });
-        this.#forget(item.id, run.id);
-        const finished = deps.store.runs.get(run.id);
-        if (this.#onFinished !== null && finished !== null) {
-          await this.#onFinished(
-            finished,
-            await this.#stageOutput(profile.adapter, resultRef, resultBytes, resultOutput),
+    const recorded = this.#trackRecording(
+      run.id,
+      process.exited
+        .then(async (exit) => {
+          const output = await logWriter.close();
+          const resultOutput = await resultWriter.close();
+          const status =
+            active.stopReason ??
+            (exit.exitCode === 0 && exit.leftoverError === null ? 'succeeded' : 'failed');
+          deps.store.transaction(
+            () =>
+              deps.store.runs.finish(run.id, {
+                status,
+                exitCode: exit.exitCode,
+                outputBytes: output.bytes,
+                outputTruncated: output.truncated,
+                now: nowIso(deps),
+              }),
+            'reserve',
           );
-        } else if (this.#onFinished === null && cycleId !== null) {
-          deps.logger.error('the result of a cycle run was dropped: no listener', {
+          if (exit.leftoverError !== null) {
+            deps.logger.error('processes left by the agent could not be stopped', {
+              runId: run.id,
+              error: exit.leftoverError,
+            });
+          }
+          deps.logger.info('agent run finished', {
             runId: run.id,
+            status,
+            exitCode: exit.exitCode,
+            spawnError: exit.spawnError,
           });
-        }
-      })
-      .catch((error: unknown) => {
-        deps.logger.error('failed to record agent run result', {
-          runId: run.id,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      })
-      .finally(() => {
-        this.#forget(item.id, run.id);
-        this.#recorded.delete(run.id);
-      });
-    this.#recorded.set(run.id, recorded);
+          this.#forget(item.id, run.id);
+          const finished = deps.store.runs.get(run.id);
+          if (this.#listeners.length > 0 && finished !== null) {
+            const stageOutput = await this.#stageOutput(
+              profile.adapter,
+              resultRef,
+              resultBytes,
+              resultOutput,
+            );
+            for (const listener of this.#listeners) await listener(finished, stageOutput);
+          } else if (this.#listeners.length === 0 && cycleId !== null) {
+            deps.logger.error('the result of a cycle run was dropped: no listener', {
+              runId: run.id,
+            });
+          }
+        })
+        .catch((error: unknown) => {
+          deps.logger.error('failed to record agent run result', {
+            runId: run.id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        })
+        .finally(() => {
+          this.#forget(item.id, run.id);
+        }),
+    );
     recorded
-      // A run stopped by shutdown finishes after the database is closed.
       .then(() => (this.#closing ? null : this.#storage.cleanupIfNeeded()))
       .catch((error: unknown) => {
         deps.logger.error('storage cleanup after run failed', {
@@ -430,6 +487,23 @@ export class RunSupervisor implements RunControl {
     await this.#recorded.get(runId);
   }
 
+  recordingState(runId: RunId | null): 'pending' | 'incomplete' {
+    return runId !== null &&
+      (this.#recorded.has(runId) || this.#deps.store.runs.get(runId)?.status === 'running')
+      ? 'pending'
+      : 'incomplete';
+  }
+
+  recordingRunIds(): readonly RunId[] {
+    return [...this.#recorded.keys()];
+  }
+
+  #trackRecording(runId: RunId, recording: Promise<void>): Promise<void> {
+    const tracked = recording.finally(() => this.#recorded.delete(runId));
+    this.#recorded.set(runId, tracked);
+    return tracked;
+  }
+
   activeRunCount(): number {
     return this.#active.size;
   }
@@ -452,6 +526,12 @@ export class RunSupervisor implements RunControl {
         });
       }
     });
+    const stillActive = new Set([...this.#active.values()].map((active) => active.runId));
+    await Promise.all(
+      [...this.#recorded]
+        .filter(([runId]) => !stillActive.has(runId))
+        .map(([, recorded]) => recorded),
+    );
     const recovery = this.recover();
     if (recovery.state === 'incomplete') {
       this.#deps.logger.error('could not record every stopped run before shutdown', {
@@ -509,6 +589,8 @@ export class RunSupervisor implements RunControl {
   async readOutput(input: { runId: RunId; maxBytes: number }): Promise<{
     run: AgentRun;
     output: string | null;
+    availability: 'available' | 'expired' | 'unavailable';
+    truncated: boolean;
   }> {
     const run = this.#deps.store.runs.get(input.runId);
     if (run === null) throw new OrviaError('NOT_FOUND', `run ${input.runId} not found`);
@@ -516,6 +598,15 @@ export class RunSupervisor implements RunControl {
       run.outputRef === null
         ? null
         : await this.#deps.cache.readTail(run.outputRef, input.maxBytes);
-    return { run, output };
+    const expired =
+      run.finishedAt !== null &&
+      this.#deps.clock.now().getTime() - Date.parse(run.finishedAt) >
+        this.#deps.limits.retentionDays * 24 * 60 * 60 * 1000;
+    return {
+      run,
+      output,
+      availability: output !== null ? 'available' : expired ? 'expired' : 'unavailable',
+      truncated: run.outputTruncated || run.outputBytes > input.maxBytes,
+    };
   }
 }

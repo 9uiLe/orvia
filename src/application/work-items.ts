@@ -3,6 +3,7 @@ import { OrviaError } from '../domain/errors.ts';
 import type { PlanId, WorkItemId } from '../domain/ids.ts';
 import { assertPlanAcceptsChanges } from '../domain/plan.ts';
 import type { AgentRun } from '../domain/records.ts';
+import type { Checkpoint } from '../domain/checkpoint.ts';
 import {
   assertWorkItemAcceptsChanges,
   OPEN_STATUSES,
@@ -20,6 +21,7 @@ export interface WorkItemDetails {
   readonly workItem: WorkItem;
   readonly currentRun: AgentRun | null;
   readonly runs: AgentRun[];
+  readonly checkpoints: Checkpoint[];
 }
 
 export interface RunControl {
@@ -76,6 +78,7 @@ export function getWorkItem(
     workItem,
     currentRun: deps.store.runs.current(workItem.id),
     runs: deps.store.runs.listForWorkItem(workItem.id),
+    checkpoints: deps.store.checkpoints.listForWorkItem(workItem.id),
   };
 }
 
@@ -168,6 +171,15 @@ export function transition(
         `work item ${item.id} has a running agent; pause it first`,
         { workItemId: item.id },
       );
+    }
+    const checkpoint = deps.store.checkpoints.latestDispatched(item.id);
+    if (kind === 'complete' && checkpoint !== null) {
+      if (checkpoint.state !== 'reviewed' || checkpoint.reviews.at(-1)?.action !== 'complete') {
+        throw new OrviaError(
+          'HUMAN_REVIEW_REQUIRED',
+          'complete the latest checkpoint with an evaluation and human decision first',
+        );
+      }
     }
     return deps.store.workItems.update(item.id, { status }, nowIso(deps));
   }, transactionModeFor(kind));

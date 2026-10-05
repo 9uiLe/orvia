@@ -1,10 +1,11 @@
 import { execFile } from 'node:child_process';
+import { StringDecoder } from 'node:string_decoder';
 
 export interface GitResult {
   readonly exitCode: number;
   readonly stdout: string;
   readonly stderr: string;
-  /** stdout reached `maxBytes` and git was stopped; `stdout` holds what was read. */
+  /** Output exceeded `maxBytes` or stdout could not be preserved as UTF-8 text. */
   readonly truncated: boolean;
 }
 
@@ -25,23 +26,33 @@ export class GitCli {
         this.#executable,
         ['-C', cwd, ...args],
         {
-          encoding: 'utf8',
-          ...(maxBytes === undefined ? {} : { maxBuffer: maxBytes }),
+          encoding: 'buffer',
+          maxBuffer: maxBytes ?? Infinity,
           // Keep read-only commands from refreshing the index or taking optional locks.
           env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', LC_ALL: 'C' },
           windowsHide: true,
         },
-        (error, stdout, stderr) => {
+        (error, output, errors) => {
+          const exceededBuffer = error?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
+          let stdout = exceededBuffer
+            ? new StringDecoder('utf8').write(output)
+            : output.toString('utf8');
+          const encoded = Buffer.from(stdout);
+          const exceededDecodedBytes = maxBytes !== undefined && encoded.length > maxBytes;
+          if (exceededDecodedBytes)
+            stdout = new StringDecoder('utf8').write(encoded.subarray(0, maxBytes));
+          const truncated = exceededBuffer || exceededDecodedBytes || !encoded.equals(output);
+          const stderr = errors.toString('utf8');
           if (error === null) {
-            resolve({ exitCode: 0, stdout, stderr, truncated: false });
+            resolve({ exitCode: 0, stdout, stderr, truncated });
             return;
           }
-          if (error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+          if (exceededBuffer) {
             resolve({ exitCode: 0, stdout, stderr, truncated: true });
             return;
           }
           if (typeof error.code === 'number') {
-            resolve({ exitCode: error.code, stdout, stderr, truncated: false });
+            resolve({ exitCode: error.code, stdout, stderr, truncated });
             return;
           }
           reject(new Error(error.message, { cause: error }));

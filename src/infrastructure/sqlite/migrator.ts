@@ -131,7 +131,7 @@ export function readHistory(db: DatabaseSync): HistoryRow[] {
 
 function verifyHistory(db: DatabaseSync, migrations: readonly Migration[], userVersion: number) {
   const history = readHistory(db);
-  if ((history.at(-1)?.version ?? 0) !== userVersion) {
+  if (history.length !== userVersion || history.some((row, index) => row.version !== index + 1)) {
     throw new OrviaError(
       'DATABASE_INTEGRITY_FAILED',
       'migration history does not match the schema version in the database header',

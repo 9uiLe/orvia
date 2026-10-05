@@ -8,12 +8,12 @@ import { OrviaError } from '../../src/domain/errors.ts';
 import type { AgentRun } from '../../src/domain/records.ts';
 import type { WorkItem } from '../../src/domain/work-item.ts';
 import type { Daemon } from '../../src/interface/daemon/daemon.ts';
-import { call, FakeAgent, rejectsWith, startTestDaemon } from '../helpers/app.ts';
+import { call, FakeAgent, rejectsWith, startPreparedRun, startTestDaemon } from '../helpers/app.ts';
 import { config, makeTestEnv, silentLogger, type TestEnv } from '../helpers/env.ts';
 import { addWorktree, createRepository } from '../helpers/git.ts';
 import { NodeProcessLauncher } from '../../src/infrastructure/agents/process-launcher.ts';
 
-// Process-group termination is guaranteed on macOS and Linux only (ADR 0008).
+// Process-group termination is guaranteed on macOS and Linux only.
 const posix = process.platform !== 'win32';
 
 function alive(pid: number): boolean {
@@ -66,7 +66,7 @@ describe('agent process lifecycle', { skip: !posix && 'POSIX process groups only
   }
 
   function runAgent(d: Daemon): Promise<AgentRun> {
-    return call<AgentRun>(d.app, 'start_run', {
+    return startPreparedRun(d.app, {
       workItemId: item.id,
       profileId: 'fake',
       instructions: 'go',

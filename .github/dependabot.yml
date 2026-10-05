@@ -13,7 +13,7 @@ updates:
     # `ignore` also suppresses security-update PRs for the matched versions, so it is limited to
     # majors of development-only tools that never ship in dist/. Their minor and patch
     # releases, all runtime dependencies, and Dependabot alerts are unaffected. These majors
-    # are upgraded by hand together with the toolchain (docs/adr/0007-external-dependencies.md).
+    # are upgraded by hand together with the toolchain.
     ignore:
       # Must match the Node.js major pinned in flake.nix. Upgrade both in one PR when moving
       # to the next Node.js LTS.

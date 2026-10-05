@@ -47,7 +47,7 @@ export interface AgentRun {
   readonly outputRef: string | null;
   readonly outputBytes: number;
   readonly outputTruncated: boolean;
-  /** The validated structured result of a cycle stage, if any. */
+  /** Cycle-stage result. Manual reports are retained by the durable checkpoint. */
   readonly result: string | null;
   readonly startedAt: string;
   readonly finishedAt: string | null;

@@ -10,6 +10,20 @@ Before 1.0.0, minor versions may contain breaking changes.
 
 ### Added
 
+- Confirmed immutable design revisions (`confirm_design`) and durable checkpoint prompts
+  (`prepare_prompt`, `get_checkpoint`, `discard_prompt`). Preparation records the target,
+  Profile and code state without launching a CLI.
+- Structured manual work reports and app evaluations with human decisions
+  (`record_checkpoint_review`). Reports, prompt text and review history survive normal Run
+  pruning and cache cleanup; a finished checkpoint waits for human review.
+- Current cumulative Git evidence (`get_checkpoint_changes`) with baseline commit, head,
+  fingerprint, observation time and completeness, including staged and untracked contents.
+  `get_checkpoint_source` reads byte pages with `nextOffset` and an expected fingerprint;
+  binary and text pages currently use base64. External and Git administrative paths are refused.
+- Database migration 0003: immutable `design_revisions` and durable `checkpoints`, including
+  prepared context, report, review history and code fingerprints. Existing records are preserved
+  without recognizing legacy runs as approved checkpoints.
+
 - Nix flake development environment (Node.js 24, git, sqlite) pinned by `flake.lock`.
 - Plans, Work Items (with split lineage), decisions with supersession, human context and
   feedback.
@@ -52,6 +66,22 @@ Before 1.0.0, minor versions may contain breaking changes.
 
 ### Fixed
 
+- Git evidence no longer hides executable mode changes when `core.filemode=false` or marks
+  `assume-unchanged` / `skip-worktree` entries as complete. UTF-8 output obeys the requested
+  byte budget, invalid text is marked partial, and untracked reads allocate by file size.
+  Legacy review evidence includes untracked text and rejects incomplete evidence.
+- Checkpoint/status views distinguish pending report persistence from failed persistence.
+  Cleanup protects pending reports and their output even after the agent exits.
+- Result schema write failures prevent agent launch; cache close errors are retained.
+- Decisions cannot supersede a different Plan/Work Item target. Finished checkpoints can be
+  reviewed while paused; continuing execution still requires explicit resume.
+- Migration history with missing versions is rejected before mutation. Executable directories
+  are no longer reported as available agent commands.
+- Invalid CLI JSON input returns `VALIDATION_FAILED`. Malformed or interrupted IPC responses
+  return `INTERNAL` instead of causing an uncaught exception or leaving a call pending.
+- Benchmark workload counts reject invalid values before setup. The storage sampler is ready
+  before measurement and is stopped and drained on both success and failure.
+
 - The cache stays within `storage.cache_max_mb` while agents write: measuring the cache during a
   run no longer releases bytes that open writers have already taken.
 - A stage's structured result has its cache space reserved before the agent starts, and Orvia
@@ -88,12 +118,26 @@ Before 1.0.0, minor versions may contain breaking changes.
 
 ### Changed
 
+- `start_run` now accepts only `{ checkpointId }` and sends the saved prompt verbatim after
+  freshness and workspace validation. The previous Work Item/Profile/free-text request is
+  rejected; repeated dispatch of a checkpoint never launches another run.
+- Standard continuation requires an app evaluation and human decision on the latest
+  checkpoint; `continue` / `revise` permit a new preparation and `complete` completes the
+  Work Item. Legacy cycles cannot start on a Work Item with a dispatched checkpoint.
+- `get_run_output` exposes `availability` (`available`, `expired`, `unavailable`) and
+  `truncated` separately. Full real-app checkpoint workflow verification remains outstanding.
+
+- Automated cycles are legacy compatibility features, disabled by default.
+  `start_cycle` and `resume_cycle` require `orchestration.enable_legacy_cycles=true` and return
+  `LEGACY_CYCLES_DISABLED` otherwise. Existing history, reviews, pause, and cancel remain available;
+  `list_agent_profiles` reports `legacyCyclesEnabled`.
 - `start_run`, `complete_work_item`, and `archive_work_item` are refused with `CYCLE_ACTIVE`
   while the Work Item has an active cycle. `pause_work_item` also pauses that cycle.
 - After a daemon restart, cycles that were running a stage are `BLOCKED / RUN_INTERRUPTED`;
   nothing is relaunched until a human resumes them.
-- `start_run` takes `profileId` instead of `agent`, and `start_cycle` takes
-  `implementationProfileId` / `reviewProfileId`. The `agents.codex` and `agents.claude`
+- Agent selection uses Profiles: `prepare_prompt` takes `profileId`, and `start_cycle` takes
+  `implementationProfileId` / `reviewProfileId`. Dispatch uses only `checkpointId`.
+  The `agents.codex` and `agents.claude`
   configuration keys are replaced by `agents.profiles`; when it is not set, profiles named
   `codex` and `claude` use the bundled adapters.
 - A stage that cannot start reports why (`AGENT_PROFILE_NOT_FOUND`,

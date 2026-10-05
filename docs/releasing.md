@@ -28,4 +28,4 @@ Not decided. The code keeps these options open:
 | Homebrew          | Formula on top of the npm package or a binary.                                                                |
 | Nix package       | A flake `packages` output built with `buildNpmPackage`; requires maintaining `npmDepsHash`.                   |
 
-Nix remains a development-environment requirement only ([ADR 0001](adr/0001-runtime-and-nix.md)).
+Nix remains a development-environment requirement only.

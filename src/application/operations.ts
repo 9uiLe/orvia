@@ -3,6 +3,7 @@ import { OrviaError } from '../domain/errors.ts';
 import { idPattern, type EntityKind, type IdByKind } from '../domain/ids.ts';
 import { describeProfiles } from './agent-profiles.ts';
 import { CYCLE_MODES } from '../domain/cycle.ts';
+import { REVIEW_ACTIONS } from '../domain/checkpoint.ts';
 import { PLAN_STATUSES } from '../domain/plan.ts';
 import type { OperationClass } from '../domain/storage.ts';
 import { WORK_ITEM_STATUSES } from '../domain/work-item.ts';
@@ -67,6 +68,8 @@ const ID_EXAMPLE: Record<EntityKind, string> = {
   cycle: 'C-1',
   review: 'Rv-1',
   finding: 'F-1',
+  designRevision: 'S-1',
+  checkpoint: 'K-1',
 };
 
 function id<K extends EntityKind>(kind: K, description: string): z.ZodType<IdByKind[K]> {
@@ -210,23 +213,109 @@ export const OPERATIONS: readonly Operation[] = [
     name: 'start_run',
     title: 'Start agent run',
     description:
-      "Start a coding agent in the Work Item's bound worktree. Orvia validates the workspace identity first and refuses with WORKSPACE_MISMATCH if it changed. Experimental.",
+      'Dispatch the exact prompt of a prepared checkpoint after human instruction. Use prepare_prompt and inspect the returned full prompt first. Requires an unchanged design, decisions, Profile, workspace, and code state. Repeating the same checkpoint never launches twice. Experimental.',
     operationClass: 'agent_run',
+    input: z.strictObject({ checkpointId: id('checkpoint', 'Prepared checkpoint to send') }),
+    handler: (app, input) => app.checkpoints.dispatch(input),
+  }),
+  defineOperation({
+    name: 'confirm_design',
+    title: 'Confirm design',
+    description:
+      'Record the design agreed with the human in the app as an immutable Plan revision. Changes create a new revision; existing runs keep their previous design. get_plan returns revision history.',
+    operationClass: 'write',
+    input: z.object({
+      planId: id('plan', 'Plan id'),
+      goal: text('Agreed goal'),
+      scope: text('Agreed scope'),
+      constraints: z.string().describe('Agreed constraints, or an empty string if none'),
+      acceptanceCriteria: text('Agreed acceptance criteria'),
+    }),
+    handler: (app, input) => app.checkpoints.confirmDesign(input),
+  }),
+  defineOperation({
+    name: 'prepare_prompt',
+    title: 'Prepare checkpoint prompt',
+    description:
+      'Prepare and persist a full prompt for one checkpoint without launching a CLI. Requires a confirmed design and, after an earlier checkpoint, app evaluation plus human decision. Inspect the returned prompt and target before instructing start_run.',
+    operationClass: 'write',
     input: z.object({
       workItemId: id('workItem', 'Work Item id'),
-      profileId: text('Agent Profile to run (see list_agent_profiles)'),
-      instructions: text('What the agent should do in this run'),
+      profileId: text('Selected Agent Profile'),
+      instructions: text('Instructions for this checkpoint'),
+      endCondition: text('When the agent must stop and report back'),
     }),
-    handler: (app, input) => app.runs.start({ kind: 'manual', ...input }),
+    handler: (app, input) => app.checkpoints.prepare(input),
+  }),
+  defineOperation({
+    name: 'get_checkpoint',
+    title: 'Get checkpoint',
+    description:
+      'Read the durable prompt, design, report, per-checkpoint changed files, evaluations and human decisions. These survive normal run pruning and cache cleanup. Agent commands are agent-reported, not verified by Orvia.',
+    operationClass: 'read',
+    input: z.object({ checkpointId: id('checkpoint', 'Checkpoint id') }),
+    handler: (app, input) => app.checkpoints.get(input),
+  }),
+  defineOperation({
+    name: 'discard_prompt',
+    title: 'Discard prepared prompt',
+    description:
+      'Mark an unsent prepared prompt as discarded. Its content remains readable; it can no longer be sent.',
+    operationClass: 'control',
+    input: z.object({ checkpointId: id('checkpoint', 'Prepared checkpoint id') }),
+    handler: (app, input) => app.checkpoints.discard(input),
+  }),
+  defineOperation({
+    name: 'record_checkpoint_review',
+    title: 'Record app evaluation and human decision',
+    description:
+      'Record the app evaluation and the human decision on the latest finished checkpoint. continue/revise enables preparing the next prompt; complete explicitly completes the Work Item. Changing a review preserves earlier evaluations and supersedes its decision.',
+    operationClass: 'write',
+    input: z.object({
+      checkpointId: id('checkpoint', 'Finished checkpoint id'),
+      evaluation: text('Evaluation from the app'),
+      action: z.enum(REVIEW_ACTIONS),
+      decision: text('The human decision and its rationale'),
+    }),
+    handler: (app, input) => app.checkpoints.review(input),
+  }),
+  defineOperation({
+    name: 'get_checkpoint_changes',
+    title: 'Read checkpoint changes',
+    description:
+      'Read current cumulative changes from the Work Item baseline, including untracked content. Returns code fingerprint, observation time and completeness. matchesReport distinguishes current code from the recorded checkpoint end state. Incomplete results require source retrieval or a larger request.',
+    operationClass: 'read',
+    input: z.object({
+      checkpointId: id('checkpoint', 'Checkpoint id'),
+      maxBytes: z.int().positive().describe('Maximum bytes of diff content'),
+      expectedFingerprint: text('Require this code state; changed state is rejected').optional(),
+    }),
+    handler: (app, input) => app.checkpoints.changes(input),
+  }),
+  defineOperation({
+    name: 'get_checkpoint_source',
+    title: 'Read checkpoint source',
+    description:
+      'Read a byte page from a file in the bound worktree, including untracked files. Use nextOffset and expectedFingerprint for subsequent pages. Binary content is base64 encoded. Returns current code, not a historical source snapshot; external paths are refused.',
+    operationClass: 'read',
+    input: z.object({
+      checkpointId: id('checkpoint', 'Checkpoint id'),
+      path: text('Path relative to the bound worktree'),
+      offset: z.int().nonnegative().default(0).describe('Byte offset'),
+      maxBytes: z.int().positive().describe('Maximum bytes to read'),
+      expectedFingerprint: text('Require this code state across pages').optional(),
+    }),
+    handler: (app, input) => app.checkpoints.source(input),
   }),
   defineOperation({
     name: 'list_agent_profiles',
     title: 'List agent profiles',
     description:
-      'The configured Agent Profiles: the adapter each uses, whether its command is available, its effective capabilities, and the cycle stages it can run; plus the default profiles for start_cycle.',
+      'The configured Agent Profiles: adapter, command availability, effective capabilities, and supported cycle stages; plus whether legacy cycles are enabled and their default profiles.',
     operationClass: 'read',
     input: z.object({}),
     handler: async (app) => ({
+      legacyCyclesEnabled: app.deps.orchestration.enableLegacyCycles,
       profiles: await describeProfiles(app.deps.profiles, app.deps.launcher),
       defaults: {
         implementationProfileId: app.deps.orchestration.defaultImplementationProfile,
@@ -238,7 +327,7 @@ export const OPERATIONS: readonly Operation[] = [
     name: 'start_cycle',
     title: 'Start cycle',
     description:
-      'Start an orchestration cycle for a Work Item. `implement` runs implement → verify → review; `review_existing` verifies and reviews changes already in the worktree. Routine findings are fixed automatically (verify → review again); findings that need a human stop the cycle in NEEDS_HUMAN. The cycle ends at HUMAN_REVIEW_READY. One active cycle per Work Item. Experimental.',
+      'Start a legacy automated cycle for a Work Item. Disabled by default: requires orchestration.enable_legacy_cycles=true, otherwise LEGACY_CYCLES_DISABLED. `implement` runs implement → verify → review; `review_existing` verifies and reviews existing changes. Routine findings are fixed automatically; human findings stop at NEEDS_HUMAN. Ends at HUMAN_REVIEW_READY. One active cycle per Work Item. Experimental compatibility feature.',
     operationClass: 'agent_run',
     input: z.object({
       workItemId: id('workItem', 'Work Item id'),
@@ -294,7 +383,7 @@ export const OPERATIONS: readonly Operation[] = [
     name: 'resume_cycle',
     title: 'Resume cycle',
     description:
-      'Resume a PAUSED, BLOCKED, or NEEDS_HUMAN cycle. Record decisions (record_decision) or context (add_context) first; the next stage uses the latest ones. After NEEDS_HUMAN the cycle reviews again, or verifies first if the code may have changed since it last passed verification.',
+      'Resume a legacy PAUSED, BLOCKED, or NEEDS_HUMAN cycle. Disabled by default: requires orchestration.enable_legacy_cycles=true, otherwise LEGACY_CYCLES_DISABLED. Record decisions or context first; the next stage uses the latest ones. After NEEDS_HUMAN the cycle reviews again, or verifies first if the code may have changed.',
     operationClass: 'agent_run',
     input: z.object({ cycleId: id('cycle', 'Cycle id') }),
     handler: (app, input) => app.cycles.resume(input),
@@ -369,7 +458,7 @@ export const OPERATIONS: readonly Operation[] = [
     name: 'record_decision',
     title: 'Record decision',
     description:
-      'Record a human decision. To change a decision, pass supersedesDecisionId; the old one is kept as superseded.',
+      'Record a human decision. To change a decision for the same Plan or Work Item target, pass supersedesDecisionId; the old one is kept as superseded.',
     operationClass: 'write',
     input: z.object({
       planId: id('plan', 'Plan id').optional(),

@@ -19,9 +19,6 @@ const profileId = z
   .string()
   .regex(PROFILE_ID_PATTERN, 'profile ids are lowercase letters, digits, and dashes');
 
-// Defaults: storage sizes are the values proposed in the project brief, and the pressure
-// thresholds and agent termination timeouts were chosen by the maintainer; see
-// docs/adr/0004-storage-policy.md and docs/adr/0008-agent-process-lifecycle.md.
 const configSchema = z
   .strictObject({
     log_level: z.enum(LOG_LEVELS).default('info'),
@@ -50,11 +47,11 @@ const configSchema = z
       .prefault({}),
     orchestration: z
       .strictObject({
-        // The brief's first candidate (3); a human resume starts the count again (ADR 0010).
+        enable_legacy_cycles: z.boolean().default(false),
         max_review_fix_cycles: z.int().positive().default(3),
         default_implementation_profile: profileId.optional(),
         default_review_profile: profileId.optional(),
-        // Chosen by the maintainer (ADR 0011): larger changes stop at NEEDS_HUMAN unreviewed.
+        // Larger changes stop unreviewed rather than review an incomplete diff.
         max_review_diff_kb: z.int().positive().default(256),
       })
       .prefault({}),

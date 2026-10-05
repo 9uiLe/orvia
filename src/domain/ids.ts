@@ -9,6 +9,8 @@ const PREFIXES = {
   cycle: 'C',
   review: 'Rv',
   finding: 'F',
+  designRevision: 'S',
+  checkpoint: 'K',
 } as const;
 
 export type EntityKind = keyof typeof PREFIXES;
@@ -21,6 +23,8 @@ export type NoteId = `N-${number}`;
 export type CycleId = `C-${number}`;
 export type ReviewId = `Rv-${number}`;
 export type FindingId = `F-${number}`;
+export type DesignRevisionId = `S-${number}`;
+export type CheckpointId = `K-${number}`;
 
 export interface IdByKind {
   plan: PlanId;
@@ -31,6 +35,8 @@ export interface IdByKind {
   cycle: CycleId;
   review: ReviewId;
   finding: FindingId;
+  designRevision: DesignRevisionId;
+  checkpoint: CheckpointId;
 }
 
 export function formatId<K extends EntityKind>(kind: K, rowId: number): IdByKind[K] {

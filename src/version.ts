@@ -10,7 +10,7 @@ const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.
 export const ORVIA_VERSION: string = manifest.version;
 
 function parseMinimumNode(range: string): readonly [number, number, number] {
-  // No semver dependency (ADR 0007); only ">=X.Y.Z" is understood. Anything else throws so a
+  // Only ">=X.Y.Z" is understood. Anything else throws so a
   // changed engines field cannot silently disable the doctor's Node check.
   const match = /^>=(\d+)\.(\d+)\.(\d+)$/.exec(range);
   if (match === null) {

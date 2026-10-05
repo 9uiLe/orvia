@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { constants } from 'node:fs';
-import { access } from 'node:fs/promises';
+import { access, stat } from 'node:fs/promises';
 import { delimiter, isAbsolute, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type {
@@ -24,7 +24,7 @@ const POLL_MS = 10;
 async function isExecutable(path: string): Promise<boolean> {
   try {
     await access(path, constants.X_OK);
-    return true;
+    return (await stat(path)).isFile();
   } catch {
     return false;
   }

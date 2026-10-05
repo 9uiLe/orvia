@@ -110,7 +110,8 @@ export class FileCache implements EphemeralStore {
       },
       close: () =>
         new Promise((resolveClose) => {
-          stream.end(() => {
+          stream.end((error?: Error | null) => {
+            streamError ??= error ?? null;
             this.#writers.delete(path);
             if (this.#closedBytes !== null) this.#closedBytes += bytes;
             for (const closedMeanwhile of this.#measurements) closedMeanwhile.set(path, bytes);

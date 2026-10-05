@@ -95,6 +95,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       logger,
       limits,
       orchestration: {
+        enableLegacyCycles: config.orchestration.enable_legacy_cycles,
         maxAutoFixRounds: config.orchestration.max_review_fix_cycles,
         defaultImplementationProfile: config.orchestration.default_implementation_profile ?? null,
         defaultReviewProfile: config.orchestration.default_review_profile ?? null,
@@ -115,12 +116,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     }
     if (recovery.state === 'incomplete') {
       // Degraded start: inspection, controls, and cleanup stay available; writes are refused
-      // until a restart completes recovery (ADR 0009).
+      // until a restart completes recovery.
       logger.error('startup recovery incomplete: database storage reserve exhausted', {
         remaining: recovery.remainingRunIds.length,
       });
     }
     try {
+      app.checkpoints.recover();
       const blocked = app.cycles.blockInterrupted();
       if (blocked.length > 0) {
         logger.warn('cycles interrupted by the previous daemon were blocked', {
@@ -129,7 +131,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       }
     } catch (error) {
       if (!isOrviaError(error) || error.code !== 'STORAGE_HARD_LIMIT') throw error;
-      logger.error('could not block interrupted cycles: database storage reserve exhausted');
+      logger.error(
+        'could not recover checkpoints or block interrupted cycles: database storage reserve exhausted',
+      );
     }
     await app.storage.cleanupIfNeeded();
     if (options.listen !== false) server = await startIpcServer(app, paths.socketPath);

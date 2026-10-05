@@ -1,4 +1,7 @@
 import type { AgentCapability } from '../domain/agent-profile.ts';
+import type { Checkpoint, DesignRevision } from '../domain/checkpoint.ts';
+import type { CheckpointId, DesignRevisionId } from '../domain/ids.ts';
+import type { CodeSnapshot, SourcePage, WorkspaceChanges } from '../domain/repository-evidence.ts';
 import type { CycleId, DecisionId, PlanId, ReviewId, RunId, WorkItemId } from '../domain/ids.ts';
 import type { Plan, PlanStatus } from '../domain/plan.ts';
 import type {
@@ -38,6 +41,57 @@ export interface Store {
   readonly cycles: CycleRepository;
   readonly reviews: ReviewRepository;
   readonly maintenance: DatabaseMaintenance;
+  readonly designRevisions: DesignRevisionRepository;
+  readonly checkpoints: CheckpointRepository;
+}
+
+export interface DesignRevisionRepository {
+  insert(
+    input: Pick<
+      DesignRevision,
+      'planId' | 'goal' | 'scope' | 'constraints' | 'acceptanceCriteria'
+    > & { now: string },
+  ): DesignRevision;
+  get(id: DesignRevisionId): DesignRevision | null;
+  latest(planId: PlanId): DesignRevision | null;
+  listForPlan(planId: PlanId): DesignRevision[];
+}
+
+export type CheckpointPatch = Partial<
+  Pick<
+    Checkpoint,
+    | 'state'
+    | 'runId'
+    | 'runStatus'
+    | 'report'
+    | 'reportError'
+    | 'endCode'
+    | 'reviews'
+    | 'finishedAt'
+  >
+>;
+
+export interface CheckpointRepository {
+  insert(
+    input: Pick<
+      Checkpoint,
+      | 'workItemId'
+      | 'designRevisionId'
+      | 'profileId'
+      | 'instructions'
+      | 'endCondition'
+      | 'prompt'
+      | 'preparedContext'
+      | 'baseCommit'
+      | 'previousCheckpointId'
+    > & { now: string },
+  ): Checkpoint;
+  get(id: CheckpointId): Checkpoint | null;
+  latestDispatched(workItemId: WorkItemId): Checkpoint | null;
+  listForWorkItem(workItemId: WorkItemId): Checkpoint[];
+  findByRun(runId: RunId): Checkpoint | null;
+  listRunning(): Checkpoint[];
+  update(id: CheckpointId, patch: CheckpointPatch): Checkpoint;
 }
 
 export interface PlanRepository {
@@ -249,6 +303,20 @@ export interface WorktreeEntry {
 }
 
 export interface GitInspector {
+  snapshot(worktreeRoot: string): Promise<CodeSnapshot>;
+  readChanges(
+    worktreeRoot: string,
+    baseCommit: string,
+    maxBytes: number,
+    expectedFingerprint?: string,
+  ): Promise<WorkspaceChanges>;
+  readSource(
+    worktreeRoot: string,
+    path: string,
+    offset: number,
+    maxBytes: number,
+    expectedFingerprint?: string,
+  ): Promise<SourcePage>;
   /** Returns null when the path does not exist or is not inside a git worktree. */
   observe(path: string): Promise<ObservedWorkspace | null>;
   listWorktrees(repositoryPath: string): Promise<WorktreeEntry[]>;

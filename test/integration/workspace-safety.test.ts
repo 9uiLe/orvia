@@ -2,10 +2,11 @@ import assert from 'node:assert/strict';
 import { mkdirSync, renameSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'node:test';
+import type { WorkItemId } from '../../src/domain/ids.ts';
 import type { AgentRun } from '../../src/domain/records.ts';
 import type { WorkItem } from '../../src/domain/work-item.ts';
 import type { Daemon } from '../../src/interface/daemon/daemon.ts';
-import { call, FakeAgent, rejectsWith, startTestDaemon } from '../helpers/app.ts';
+import { call, FakeAgent, rejectsWith, startPreparedRun, startTestDaemon } from '../helpers/app.ts';
 import { makeTestEnv, type TestEnv } from '../helpers/env.ts';
 import { addWorktree, createRepository, git } from '../helpers/git.ts';
 
@@ -40,15 +41,15 @@ describe('workspace identity safety', () => {
     });
   }
 
-  async function startRun(workItemId: string): Promise<AgentRun> {
-    return call<AgentRun>(daemon.app, 'start_run', {
+  async function startRun(workItemId: WorkItemId): Promise<AgentRun> {
+    return startPreparedRun(daemon.app, {
       workItemId,
       profileId: 'fake',
       instructions: 'do it',
     });
   }
 
-  async function assertRefused(workItemId: string, reason: string): Promise<void> {
+  async function assertRefused(workItemId: WorkItemId, reason: string): Promise<void> {
     const error = await rejectsWith(startRun(workItemId), 'WORKSPACE_MISMATCH');
     assert.ok((error.details['reasons'] as string[]).includes(reason), error.message);
     assert.equal(agent.invocations.length, 0, 'no agent may start after a mismatch');

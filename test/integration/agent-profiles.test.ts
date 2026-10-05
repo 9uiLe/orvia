@@ -96,7 +96,7 @@ describe('agent profiles and capabilities', () => {
       config: config({
         // The configuration's own profiles must name what the defaults refer to.
         agents: { profiles },
-        orchestration: options.orchestration ?? {},
+        orchestration: { enable_legacy_cycles: true, ...options.orchestration },
         storage: options.storage ?? {},
       }),
     });

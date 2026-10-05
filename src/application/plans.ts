@@ -2,6 +2,7 @@ import { OrviaError } from '../domain/errors.ts';
 import type { PlanId } from '../domain/ids.ts';
 import { assertPlanAcceptsChanges, type Plan, type PlanStatus } from '../domain/plan.ts';
 import type { Decision, Note } from '../domain/records.ts';
+import type { DesignRevision } from '../domain/checkpoint.ts';
 import { OPEN_STATUSES, type WorkItem } from '../domain/work-item.ts';
 import { nowIso, type Dependencies } from './dependencies.ts';
 
@@ -10,6 +11,7 @@ export interface PlanDetails {
   readonly workItems: WorkItem[];
   readonly decisions: Decision[];
   readonly notes: Note[];
+  readonly designRevisions: DesignRevision[];
 }
 
 export function requirePlan(deps: Dependencies, planId: PlanId): Plan {
@@ -38,6 +40,7 @@ export function getPlan(deps: Dependencies, input: { planId: PlanId }): PlanDeta
     workItems: deps.store.workItems.list({ planId: plan.id }),
     decisions: deps.store.decisions.listForPlan(plan.id),
     notes: deps.store.notes.listForPlan(plan.id),
+    designRevisions: deps.store.designRevisions.listForPlan(plan.id),
   };
 }
 

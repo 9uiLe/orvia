@@ -46,26 +46,22 @@ Run `npm run check` before opening a pull request.
 - Never edit a migration that has already been applied; add a new one.
 - Add tests with behavior changes: unit tests in `test/unit`, integration tests in `test/integration`.
 
-## Architecture decisions
-
-Important design decisions are recorded as ADRs in `docs/adr/` using the file name `NNNN-title.md`. A significant change needs an ADR, added in the same pull request or an earlier one.
-
 ## Commits and pull requests
 
 - Use Conventional Commits: `feat:`, `fix:`, `docs:`, `chore:`, `ci:`, `test:`, `refactor:`.
 - Changes go through pull requests to `master`. CI must pass and review conversations must be resolved. Force-pushing to `master` is disabled.
-- Fill in the pull request template. Keep the README Implemented/Planned sections accurate: do not describe planned work as implemented.
+- Fill in the pull request template. Keep `docs/specification.md` as the product specification and update it with behavior changes. Update relevant tests, its implementation-status section, and `docs/current-implementation.md` in the same change. Keep the README's entry points accurate.
 
 ## Updating dependencies
 
-- Prefer the Node.js standard library and dependencies already in use. A new dependency needs
-  the review described in [ADR 0007](docs/adr/0007-external-dependencies.md). If it adds runtime
-  packages, run `npm run deps:check -- --write` and commit `docs/runtime-dependencies.txt`; CI
-  fails otherwise.
+- Prefer the Node.js standard library and dependencies already in use. Before adding a runtime
+  dependency, review its necessity, maintenance cost, security, transitive dependencies, install
+  scripts, and version pinning. If it adds runtime packages, run `npm run deps:check -- --write`
+  and commit `docs/runtime-dependencies.txt`; CI fails otherwise.
 
 - Nix inputs are updated deliberately with `nix flake update`, in a dedicated pull request. A
-  change of Node.js (and therefore SQLite) must pass the storage-contract tests in CI and be
-  compared with `npm run bench:storage`; see [ADR 0009](docs/adr/0009-storage-contract.md#sqlite-compatibility).
+  change of Node.js (and therefore SQLite) must pass the storage-contract and migration tests,
+  plus process-lifecycle tests, and be compared with `npm run bench:storage`.
 - JavaScript dependencies are updated by Dependabot (grouped, with a cooldown). Do not mix manual dependency bumps into feature pull requests.
 
 ## Issues and secrets

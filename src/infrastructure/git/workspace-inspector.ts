@@ -3,6 +3,12 @@ import type { ChangeEvidence, GitInspector, WorktreeEntry } from '../../applicat
 import { OrviaError } from '../../domain/errors.ts';
 import type { ObservedWorkspace } from '../../domain/workspace.ts';
 import type { GitCli } from './git-cli.ts';
+import { RepositoryEvidence } from './repository-evidence.ts';
+import type {
+  CodeSnapshot,
+  SourcePage,
+  WorkspaceChanges,
+} from '../../domain/repository-evidence.ts';
 
 const BRANCH_PREFIX = 'refs/heads/';
 
@@ -26,6 +32,40 @@ export class GitWorkspaceInspector implements GitInspector {
 
   constructor(git: GitCli) {
     this.#git = git;
+  }
+
+  snapshot(worktreeRoot: string): Promise<CodeSnapshot> {
+    return new RepositoryEvidence(this.#git).snapshot(worktreeRoot);
+  }
+
+  readChanges(
+    worktreeRoot: string,
+    baseCommit: string,
+    maxBytes: number,
+    expectedFingerprint?: string,
+  ): Promise<WorkspaceChanges> {
+    return new RepositoryEvidence(this.#git).readChanges(
+      worktreeRoot,
+      baseCommit,
+      maxBytes,
+      expectedFingerprint,
+    );
+  }
+
+  readSource(
+    worktreeRoot: string,
+    path: string,
+    offset: number,
+    maxBytes: number,
+    expectedFingerprint?: string,
+  ): Promise<SourcePage> {
+    return new RepositoryEvidence(this.#git).readSource(
+      worktreeRoot,
+      path,
+      offset,
+      maxBytes,
+      expectedFingerprint,
+    );
   }
 
   async observe(path: string): Promise<ObservedWorkspace | null> {
@@ -103,38 +143,6 @@ export class GitWorkspaceInspector implements GitInspector {
     baseCommit: string,
     maxBytes: number,
   ): Promise<ChangeEvidence> {
-    const head = await this.#git.run(worktreeRoot, ['rev-parse', '--verify', '--quiet', 'HEAD']);
-    const status = await this.#git.run(
-      worktreeRoot,
-      ['status', '--porcelain=v1', '--untracked-files=all'],
-      maxBytes,
-    );
-    if (status.exitCode !== 0) {
-      throw new OrviaError('VALIDATION_FAILED', 'git status failed in the bound worktree', {
-        worktreeRoot,
-      });
-    }
-    const remaining = maxBytes - Buffer.byteLength(status.stdout);
-    const diff =
-      status.truncated || remaining <= 0
-        ? null
-        : await this.#git.run(
-            worktreeRoot,
-            ['diff', '--no-color', '--no-ext-diff', '--no-textconv', baseCommit, '--'],
-            remaining,
-          );
-    if (diff !== null && diff.exitCode !== 0) {
-      throw new OrviaError('VALIDATION_FAILED', 'git diff failed in the bound worktree', {
-        worktreeRoot,
-        baseCommit,
-      });
-    }
-    return {
-      baseCommit,
-      head: head.exitCode === 0 ? head.stdout.trim() : null,
-      status: status.stdout,
-      diff: diff?.stdout ?? '',
-      complete: diff !== null && !diff.truncated,
-    };
+    return new RepositoryEvidence(this.#git).legacyChanges(worktreeRoot, baseCommit, maxBytes);
   }
 }

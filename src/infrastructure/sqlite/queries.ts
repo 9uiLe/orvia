@@ -16,12 +16,30 @@ const FINDING_COLUMNS = `id, review_id, category, title, detail, evidence, sugge
 const DECISION_COLUMNS =
   'id, plan_id, work_item_id, title, body, status, supersedes_id, created_at';
 const NOTE_COLUMNS = 'id, plan_id, work_item_id, kind, body, created_at';
+const DESIGN_REVISION_COLUMNS =
+  'id, plan_id, revision, goal, scope, constraints_text, acceptance_criteria, confirmed_at';
+const CHECKPOINT_COLUMNS = `id, work_item_id, design_revision_id, profile_id, instructions,
+  end_condition, prompt, prepared_context, base_commit, previous_checkpoint_id, state,
+  run_id, run_status, report, report_error, end_code, reviews, prepared_at, finished_at`;
 
 /**
  * Every read the application performs, by name. The schema's indexes are derived from these;
  * test/integration/query-plans.test.ts checks them with EXPLAIN QUERY PLAN.
  */
 export const READ_QUERIES = {
+  getDesignRevision: `SELECT ${DESIGN_REVISION_COLUMNS} FROM design_revisions WHERE id = ?`,
+  getLatestDesignRevision: `SELECT ${DESIGN_REVISION_COLUMNS} FROM design_revisions
+    WHERE plan_id = ? ORDER BY revision DESC LIMIT 1`,
+  listDesignRevisionsForPlan: `SELECT ${DESIGN_REVISION_COLUMNS} FROM design_revisions
+    WHERE plan_id = ? ORDER BY revision DESC`,
+  getCheckpoint: `SELECT ${CHECKPOINT_COLUMNS} FROM checkpoints WHERE id = ?`,
+  getLatestDispatchedCheckpoint: `SELECT ${CHECKPOINT_COLUMNS} FROM checkpoints
+    WHERE work_item_id = ? AND state NOT IN ('prepared', 'discarded') ORDER BY id DESC LIMIT 1`,
+  listCheckpointsForWorkItem: `SELECT ${CHECKPOINT_COLUMNS} FROM checkpoints
+    WHERE work_item_id = ? ORDER BY id DESC`,
+  getCheckpointByRun: `SELECT ${CHECKPOINT_COLUMNS} FROM checkpoints WHERE run_id = ?`,
+  listRunningCheckpoints: `SELECT ${CHECKPOINT_COLUMNS} FROM checkpoints
+    WHERE state = 'running' ORDER BY id`,
   getCycle: `SELECT ${CYCLE_COLUMNS} FROM cycles WHERE id = ?`,
   getActiveCycle: `SELECT ${CYCLE_COLUMNS} FROM cycles
     WHERE work_item_id = ? AND state IN (${ACTIVE_CYCLE_STATES})`,
@@ -66,6 +84,15 @@ export const READ_QUERIES = {
 export type ReadQueryName = keyof typeof READ_QUERIES;
 
 export const WRITE_STATEMENTS = {
+  insertDesignRevision: `INSERT INTO design_revisions
+    (plan_id, revision, goal, scope, constraints_text, acceptance_criteria, confirmed_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  insertCheckpoint: `INSERT INTO checkpoints
+    (work_item_id, design_revision_id, profile_id, instructions, end_condition, prompt,
+     prepared_context, base_commit, previous_checkpoint_id, state, prepared_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'prepared', ?)`,
+  updateCheckpoint: `UPDATE checkpoints SET state = ?, run_id = ?, run_status = ?,
+    report = ?, report_error = ?, end_code = ?, reviews = ?, finished_at = ? WHERE id = ?`,
   insertPlan: `INSERT INTO plans (title, description, status, created_at, updated_at)
     VALUES (?, ?, 'active', ?, ?)`,
   updatePlan: `UPDATE plans SET title = ?, description = ?, status = ?, updated_at = ? WHERE id = ?`,

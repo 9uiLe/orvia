@@ -17,6 +17,8 @@ import {
 import { MIGRATIONS } from '../../src/infrastructure/sqlite/migrations/index.ts';
 import { initial } from '../../src/infrastructure/sqlite/migrations/0001_initial.ts';
 import { orchestration } from '../../src/infrastructure/sqlite/migrations/0002_orchestration.ts';
+import { checkpoints } from '../../src/infrastructure/sqlite/migrations/0003_checkpoints.ts';
+import { CHECKPOINT_STATES } from '../../src/domain/checkpoint.ts';
 import {
   CYCLE_MODES,
   CYCLE_REASONS,
@@ -201,7 +203,7 @@ describe('database migrations', () => {
     }
   });
 
-  test('shipped 0001 data → 0002 orchestration: existing runs become manual runs', async () => {
+  test('shipped 0001 data → latest: existing runs become manual runs', async () => {
     const first = open(MIGRATIONS.slice(0, 1));
     const at = '2026-01-01T00:00:00.000Z';
     first.db.exec(`
@@ -215,7 +217,10 @@ describe('database migrations', () => {
 
     const daemon = await startTestDaemon(env, { clock });
     try {
-      assert.deepEqual(daemon.migration.applied, [2]);
+      assert.deepEqual(
+        daemon.migration.applied,
+        MIGRATIONS.slice(1).map((migration) => migration.version),
+      );
       const runs = await call<{ runs: { id: string; purpose: string; cycleId: unknown }[] }>(
         daemon.app,
         'get_work_item',
@@ -236,6 +241,48 @@ describe('database migrations', () => {
     return list.split(',').map((value) => value.trim().replace(/'/g, ''));
   }
 
+  test('shipped 0002 data → 0003 preserves history without treating it as a confirmed design or prompt', () => {
+    const old = open([initial, orchestration]);
+    old.db.exec(`
+      INSERT INTO plans VALUES (1, 'legacy plan', 'unconfirmed description', 'active', 'before', 'before');
+      INSERT INTO work_items (id, plan_id, title, description, status, created_at, updated_at)
+        VALUES (1, 1, 'legacy work', '', 'active', 'before', 'before');
+      INSERT INTO runs (id, work_item_id, profile_id, status, exit_code, output_ref, started_at, finished_at, result)
+        VALUES (1, 1, 'codex', 'succeeded', 0, 'runs/old.log', 'before', 'before', '{"summary":"old"}');
+      INSERT INTO decisions (id, plan_id, title, body, status, created_at)
+        VALUES (1, 1, 'legacy decision', 'accepted before migration', 'accepted', 'before');
+      INSERT INTO notes (id, plan_id, kind, body, created_at)
+        VALUES (1, 1, 'context', 'legacy context', 'before');
+    `);
+    const tables = ['plans', 'work_items', 'runs', 'decisions', 'notes'];
+    const before = tables.map((table) => old.db.prepare(`SELECT * FROM ${table}`).all());
+    old.db.close();
+
+    const migrated = open(MIGRATIONS);
+    try {
+      assert.deepEqual(migrated.migration.applied, [3]);
+      assert.deepEqual(
+        tables.map((table) => migrated.db.prepare(`SELECT * FROM ${table}`).all()),
+        before,
+      );
+      assert.equal(
+        migrated.db.prepare('SELECT count(*) AS n FROM design_revisions').get()?.['n'],
+        0,
+      );
+      assert.equal(migrated.db.prepare('SELECT count(*) AS n FROM checkpoints').get()?.['n'], 0);
+      assert.ok(migrated.migration.backupPath !== null);
+      const backup = new DatabaseSync(migrated.migration.backupPath, { readOnly: true });
+      try {
+        assert.equal(pragma(backup, 'user_version'), 2);
+        assert.deepEqual(backup.prepare('SELECT * FROM runs').all(), before[2]);
+      } finally {
+        backup.close();
+      }
+    } finally {
+      migrated.db.close();
+    }
+  });
+
   function checkedValues(sql: string, table: string, column: string): string[] {
     const body = new RegExp(`CREATE TABLE ${table} \\(([\\s\\S]*?)\\n\\)`).exec(sql)?.[1];
     assert.ok(body !== undefined, table);
@@ -252,7 +299,7 @@ describe('database migrations', () => {
     return quotedValues(match[1]);
   }
 
-  test('0001 and 0002 allow every value the domain defines, and only those', () => {
+  test('shipped migrations allow every value the domain defines, and only those', () => {
     // The migrations are frozen SQL; a value added to the domain later needs a new migration.
     const checks: [string, string, string, readonly string[]][] = [
       [initial.sql, 'plans', 'status', PLAN_STATUSES],
@@ -268,6 +315,8 @@ describe('database migrations', () => {
       [orchestration.sql, 'review_findings', 'category', FINDING_CATEGORIES],
       [orchestration.sql, 'review_findings', 'policy_action', POLICY_ACTIONS],
       [orchestration.sql, 'review_findings', 'policy_reason', POLICY_REASONS],
+      [checkpoints.sql, 'checkpoints', 'state', CHECKPOINT_STATES],
+      [checkpoints.sql, 'checkpoints', 'run_status', RUN_STATUSES],
     ];
     for (const [sql, table, column, values] of checks) {
       assert.deepEqual(checkedValues(sql, table, column), [...values], `${table}.${column}`);
@@ -341,6 +390,21 @@ describe('database migrations', () => {
     const edited = { ...v1, sql: `${v1.sql} -- edited` };
     assert.throws(() => open([edited]), { code: 'MIGRATION_CHECKSUM_MISMATCH' });
   });
+
+  for (const missingVersion of [1, 2]) {
+    test(`missing applied migration v${missingVersion} is rejected without changing the database`, () => {
+      open([v1, v2, v3]).db.close();
+      const db = new DatabaseSync(env.paths.databaseFile);
+      db.prepare('DELETE FROM orvia_schema_migrations WHERE version = ?').run(missingVersion);
+      db.close();
+      const before = sha256(env.paths.databaseFile);
+      const beforeBackups = backups();
+
+      assert.throws(() => open([v1, v2, v3]), { code: 'DATABASE_INTEGRITY_FAILED' });
+      assert.equal(sha256(env.paths.databaseFile), before);
+      assert.deepEqual(backups(), beforeBackups);
+    });
+  }
 
   test('a database file that Orvia did not create is rejected', () => {
     const foreign = new DatabaseSync(env.paths.databaseFile);

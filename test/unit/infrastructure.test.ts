@@ -34,6 +34,7 @@ describe('configuration', () => {
       claude: { adapter: 'claude' },
     });
     assert.deepEqual(config.orchestration, {
+      enable_legacy_cycles: false,
       max_review_fix_cycles: 3,
       max_review_diff_kb: 256,
     });
@@ -183,7 +184,7 @@ describe('operation registry', () => {
     );
   });
 
-  test('every Work Item mutation requires an explicit workItemId', () => {
+  test('every Work Item mutation requires an explicit Work Item or Checkpoint id', () => {
     // An operation that also takes a planId may scope itself to the Plan instead of one item.
     const mutations = OPERATIONS.filter((operation) => {
       const { properties } = z.toJSONSchema(operation.input) as {
@@ -191,14 +192,17 @@ describe('operation registry', () => {
       };
       return (
         operation.operationClass !== 'read' &&
-        'workItemId' in properties &&
+        ('workItemId' in properties || 'checkpointId' in properties) &&
         !('planId' in properties)
       );
     });
     assert.ok(mutations.length > 0);
     for (const operation of mutations) {
       const schema = z.toJSONSchema(operation.input) as { required?: string[] };
-      assert.ok(schema.required?.includes('workItemId'), operation.name);
+      assert.ok(
+        schema.required?.includes('workItemId') || schema.required?.includes('checkpointId'),
+        operation.name,
+      );
     }
   });
 });

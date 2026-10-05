@@ -1,5 +1,8 @@
 import type { DatabaseSync, SQLInputValue, StatementSync } from 'node:sqlite';
 import type {
+  CheckpointPatch,
+  CheckpointRepository,
+  DesignRevisionRepository,
   CyclePatch,
   CycleRepository,
   DatabaseMaintenance,
@@ -15,11 +18,22 @@ import type {
   WorkItemPatch,
   WorkItemRepository,
 } from '../../application/ports.ts';
+import type {
+  Checkpoint,
+  DesignRevision,
+  PreparedContext,
+  WorkReport,
+  CheckpointReview,
+  CheckpointState,
+} from '../../domain/checkpoint.ts';
+import type { CodeSnapshot } from '../../domain/repository-evidence.ts';
 import { OrviaError } from '../../domain/errors.ts';
 import {
   formatId,
   parseId,
   type DecisionId,
+  type CheckpointId,
+  type DesignRevisionId,
   type PlanId,
   type CycleId,
   type ReviewId,
@@ -84,6 +98,50 @@ function num(row: Row, column: string): number {
 
 function numOrNull(row: Row, column: string): number | null {
   return row[column] === null ? null : num(row, column);
+}
+
+function jsonOrNull(row: Row, column: string): unknown {
+  const value = strOrNull(row, column);
+  return value === null ? null : (JSON.parse(value) as unknown);
+}
+
+function rowToDesignRevision(row: Row): DesignRevision {
+  return {
+    id: formatId('designRevision', num(row, 'id')),
+    planId: formatId('plan', num(row, 'plan_id')),
+    revision: num(row, 'revision'),
+    goal: str(row, 'goal'),
+    scope: str(row, 'scope'),
+    constraints: str(row, 'constraints_text'),
+    acceptanceCriteria: str(row, 'acceptance_criteria'),
+    confirmedAt: str(row, 'confirmed_at'),
+  };
+}
+
+function rowToCheckpoint(row: Row): Checkpoint {
+  const previous = numOrNull(row, 'previous_checkpoint_id');
+  const run = numOrNull(row, 'run_id');
+  return {
+    id: formatId('checkpoint', num(row, 'id')),
+    workItemId: formatId('workItem', num(row, 'work_item_id')),
+    designRevisionId: formatId('designRevision', num(row, 'design_revision_id')),
+    profileId: str(row, 'profile_id'),
+    instructions: str(row, 'instructions'),
+    endCondition: str(row, 'end_condition'),
+    prompt: str(row, 'prompt'),
+    preparedContext: JSON.parse(str(row, 'prepared_context')) as PreparedContext,
+    baseCommit: str(row, 'base_commit'),
+    previousCheckpointId: previous === null ? null : formatId('checkpoint', previous),
+    state: str(row, 'state') as CheckpointState,
+    runId: run === null ? null : formatId('run', run),
+    runStatus: strOrNull(row, 'run_status') as RunStatus | null,
+    report: jsonOrNull(row, 'report') as WorkReport | null,
+    reportError: strOrNull(row, 'report_error'),
+    endCode: jsonOrNull(row, 'end_code') as CodeSnapshot | null,
+    reviews: JSON.parse(str(row, 'reviews')) as CheckpointReview[],
+    preparedAt: str(row, 'prepared_at'),
+    finishedAt: strOrNull(row, 'finished_at'),
+  };
 }
 
 function rowToPlan(row: Row): Plan {
@@ -236,6 +294,8 @@ export interface StoreBudget {
 
 /** All SQL lives in this module and queries.ts; the application sees only the Store port. */
 export class SqliteStore implements Store {
+  readonly designRevisions: DesignRevisionRepository;
+  readonly checkpoints: CheckpointRepository;
   readonly plans: PlanRepository;
   readonly workItems: WorkItemRepository;
   readonly runs: RunRepository;
@@ -267,6 +327,96 @@ export class SqliteStore implements Store {
     const mustGet = <T>(value: T | null, what: string): T => {
       if (value === null) throw new OrviaError('NOT_FOUND', `${what} not found`);
       return value;
+    };
+    const getDesignRevision = (id: DesignRevisionId): DesignRevision | null => {
+      const row = one(q.getDesignRevision, parseId('designRevision', id));
+      return row === undefined ? null : rowToDesignRevision(row);
+    };
+    const latestDesignRevision = (planId: PlanId): DesignRevision | null => {
+      const row = one(q.getLatestDesignRevision, parseId('plan', planId));
+      return row === undefined ? null : rowToDesignRevision(row);
+    };
+    this.designRevisions = {
+      insert: (input) => {
+        const result = run(
+          w.insertDesignRevision,
+          parseId('plan', input.planId),
+          (latestDesignRevision(input.planId)?.revision ?? 0) + 1,
+          input.goal,
+          input.scope,
+          input.constraints,
+          input.acceptanceCriteria,
+          input.now,
+        );
+        return mustGet(
+          getDesignRevision(formatId('designRevision', Number(result.lastInsertRowid))),
+          'design revision',
+        );
+      },
+      get: getDesignRevision,
+      latest: latestDesignRevision,
+      listForPlan: (planId) =>
+        all(q.listDesignRevisionsForPlan, parseId('plan', planId)).map(rowToDesignRevision),
+    };
+    const getCheckpoint = (id: CheckpointId): Checkpoint | null => {
+      const row = one(q.getCheckpoint, parseId('checkpoint', id));
+      return row === undefined ? null : rowToCheckpoint(row);
+    };
+    this.checkpoints = {
+      insert: (input) => {
+        const result = run(
+          w.insertCheckpoint,
+          parseId('workItem', input.workItemId),
+          parseId('designRevision', input.designRevisionId),
+          input.profileId,
+          input.instructions,
+          input.endCondition,
+          input.prompt,
+          JSON.stringify(input.preparedContext),
+          input.baseCommit,
+          input.previousCheckpointId === null
+            ? null
+            : parseId('checkpoint', input.previousCheckpointId),
+          input.now,
+        );
+        return mustGet(
+          getCheckpoint(formatId('checkpoint', Number(result.lastInsertRowid))),
+          'checkpoint',
+        );
+      },
+      get: getCheckpoint,
+      latestDispatched: (workItemId) => {
+        const row = one(q.getLatestDispatchedCheckpoint, parseId('workItem', workItemId));
+        return row === undefined ? null : rowToCheckpoint(row);
+      },
+      listForWorkItem: (workItemId) =>
+        all(q.listCheckpointsForWorkItem, parseId('workItem', workItemId)).map(rowToCheckpoint),
+      findByRun: (runId) => {
+        const row = one(q.getCheckpointByRun, parseId('run', runId));
+        return row === undefined ? null : rowToCheckpoint(row);
+      },
+      listRunning: () => all(q.listRunningCheckpoints).map(rowToCheckpoint),
+      update: (id, patch: CheckpointPatch) => {
+        const current = mustGet(getCheckpoint(id), `checkpoint ${id}`);
+        const pick = <K extends keyof CheckpointPatch>(key: K): Checkpoint[K] =>
+          patch[key] === undefined ? current[key] : patch[key];
+        const runId = pick('runId');
+        const report = pick('report');
+        const endCode = pick('endCode');
+        run(
+          w.updateCheckpoint,
+          pick('state'),
+          runId === null ? null : parseId('run', runId),
+          pick('runStatus'),
+          report === null ? null : JSON.stringify(report),
+          pick('reportError'),
+          endCode === null ? null : JSON.stringify(endCode),
+          JSON.stringify(pick('reviews')),
+          pick('finishedAt'),
+          parseId('checkpoint', id),
+        );
+        return mustGet(getCheckpoint(id), `checkpoint ${id}`);
+      },
     };
     this.plans = {
       insert: (input) => {

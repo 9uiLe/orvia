@@ -3,7 +3,7 @@ import { parseArgs } from 'node:util';
 import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import * as z from 'zod/v4';
 import { findOperation, OPERATIONS, type Operation } from '../../application/operations.ts';
-import { isOrviaError } from '../../domain/errors.ts';
+import { isOrviaError, OrviaError } from '../../domain/errors.ts';
 import { resolvePaths, type OrviaPaths } from '../../infrastructure/paths.ts';
 import { ORVIA_VERSION } from '../../version.ts';
 import { startDaemon } from '../daemon/daemon.ts';
@@ -84,8 +84,16 @@ function inputFromFlags(operation: Operation, args: readonly string[]): unknown 
       },
     },
   );
-  const input: Record<string, unknown> =
-    typeof values.input === 'string' ? (JSON.parse(values.input) as Record<string, unknown>) : {};
+  let parsed: unknown = {};
+  try {
+    if (typeof values.input === 'string') parsed = JSON.parse(values.input) as unknown;
+  } catch {
+    throw new OrviaError('VALIDATION_FAILED', '--input must be a valid JSON object');
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new OrviaError('VALIDATION_FAILED', '--input must be a valid JSON object');
+  }
+  const input = parsed as Record<string, unknown>;
   for (const spec of specs) {
     const value = values[spec.flag];
     if (value === undefined) continue;

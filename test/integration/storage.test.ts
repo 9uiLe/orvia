@@ -3,11 +3,13 @@ import { chmodSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from 'n
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'node:test';
 import type { CleanupReport, StorageStatus } from '../../src/application/storage.ts';
+import type { Checkpoint } from '../../src/domain/checkpoint.ts';
+import type { WorkItemId } from '../../src/domain/ids.ts';
 import type { AgentRun } from '../../src/domain/records.ts';
 import type { StorageAssessment } from '../../src/domain/storage.ts';
 import type { WorkItem } from '../../src/domain/work-item.ts';
 import type { Daemon } from '../../src/interface/daemon/daemon.ts';
-import { call, FakeAgent, rejectsWith, startTestDaemon } from '../helpers/app.ts';
+import { call, FakeAgent, rejectsWith, startPreparedRun, startTestDaemon } from '../helpers/app.ts';
 import { config, makeTestEnv, type TestEnv } from '../helpers/env.ts';
 import { addWorktree, createRepository, snapshotRepository } from '../helpers/git.ts';
 import { fillDurableData } from '../helpers/storage-fill.ts';
@@ -68,8 +70,8 @@ describe('bounded storage', () => {
     return { item, repo };
   }
 
-  async function runToEnd(d: Daemon, workItemId: string): Promise<AgentRun> {
-    const run = await call<AgentRun>(d.app, 'start_run', {
+  async function runToEnd(d: Daemon, workItemId: WorkItemId): Promise<AgentRun> {
+    const run = await startPreparedRun(d.app, {
       workItemId,
       profileId: 'fake',
       instructions: 'go',
@@ -124,7 +126,7 @@ describe('bounded storage', () => {
       'STORAGE_HARD_LIMIT',
     );
     await rejectsWith(
-      call(d.app, 'start_run', { workItemId: item.id, profileId: 'fake', instructions: 'go' }),
+      startPreparedRun(d.app, { workItemId: item.id, profileId: 'fake', instructions: 'go' }),
       'STORAGE_HARD_LIMIT',
     );
     await call(d.app, 'get_status');
@@ -167,24 +169,40 @@ describe('bounded storage', () => {
     const agent = new FakeAgent();
     const d = await start({ max_completed_runs_per_work_item: 2 }, agent);
     const { item } = await boundWorkItem(d);
-    await call(d.app, 'record_decision', { planId: 'P-1', title: 'Use X', body: 'because' });
+    const decision = await call<{ id: string }>(d.app, 'record_decision', {
+      planId: 'P-1',
+      title: 'Use X',
+      body: 'because',
+    });
     await call(d.app, 'add_context', { workItemId: item.id, body: 'context' });
     await call(d.app, 'submit_feedback', { workItemId: item.id, kind: 'redirect', body: 'turn' });
     const runs: AgentRun[] = [];
     for (let i = 0; i < 4; i++) runs.push(await runToEnd(d, item.id));
 
     await call<CleanupReport>(d.app, 'run_storage_cleanup');
-    const plan = await call<{ workItems: unknown[]; decisions: unknown[]; notes: unknown[] }>(
-      d.app,
-      'get_plan',
-      { planId: 'P-1' },
-    );
+    const plan = await call<{
+      workItems: unknown[];
+      decisions: { id: string }[];
+      notes: unknown[];
+    }>(d.app, 'get_plan', { planId: 'P-1' });
     assert.equal(plan.workItems.length, 1);
-    assert.equal(plan.decisions.length, 1);
     assert.equal(plan.notes.length, 2);
-    const details = await call<{ runs: AgentRun[] }>(d.app, 'get_work_item', {
-      workItemId: item.id,
-    });
+    const details = await call<{ runs: AgentRun[]; checkpoints: Checkpoint[] }>(
+      d.app,
+      'get_work_item',
+      {
+        workItemId: item.id,
+      },
+    );
+    assert.deepEqual(
+      plan.decisions.map((entry) => entry.id).sort(),
+      [
+        decision.id,
+        ...details.checkpoints.flatMap((checkpoint) =>
+          checkpoint.reviews.map((review) => review.decisionId),
+        ),
+      ].sort(),
+    );
     assert.deepEqual(
       details.runs.map((run) => run.id),
       [runs[3]?.id, runs[2]?.id],
@@ -202,7 +220,7 @@ describe('bounded storage', () => {
     const { item } = await boundWorkItem(d);
     const release = join(env.root, 'release');
     agent.mode = `wait:${release}`;
-    const run = await call<AgentRun>(d.app, 'start_run', {
+    const run = await startPreparedRun(d.app, {
       workItemId: item.id,
       profileId: 'fake',
       instructions: 'go',

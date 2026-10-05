@@ -1,9 +1,10 @@
 import * as z from 'zod/v4';
 import { FINDING_CATEGORIES, REVIEW_VERDICTS, VERIFICATION_STATUSES } from '../domain/review.ts';
+import type { WorkReport } from '../domain/checkpoint.ts';
 
 /**
  * Limits on what a structured agent result may put into the durable database, approved by the
- * maintainer (ADR 0010). Results beyond them are rejected, never truncated, and the cycle
+ * maintainer. Results beyond them are rejected, never truncated, and the cycle
  * blocks; the raw output stays in the bounded cache for inspection.
  */
 export const RESULT_LIMITS = {
@@ -80,14 +81,42 @@ export type VerificationResult = z.output<typeof verificationResultShape>;
 export type ImplementationResult = z.output<typeof implementationResultShape>;
 export type FixResult = z.output<typeof fixResultShape>;
 
-export type ResultPurpose = 'implementation' | 'verification' | 'review' | 'fix';
+export const workReportShape = z.strictObject({
+  status: z.enum(['completed', 'needs_input']),
+  summary: z.string(),
+  commands: z.array(
+    z.strictObject({ command: z.string(), exitCode: z.number().nullable(), summary: z.string() }),
+  ),
+  unresolved: z.string(),
+  requiredDecision: z.string(),
+});
+
+export type ResultPurpose = 'manual' | 'implementation' | 'verification' | 'review' | 'fix';
 
 const SHAPES = {
+  manual: workReportShape,
   implementation: implementationResultShape,
   verification: verificationResultShape,
   review: reviewResultShape,
   fix: fixResultShape,
 } as const;
+
+export function parseWorkReport(raw: string | null): WorkReport {
+  const result = parseShape(workReportShape, raw);
+  const problems: string[] = [];
+  checkLength(problems, 'summary', result.summary, L.summary);
+  checkLength(problems, 'unresolved', result.unresolved, L.detail);
+  checkLength(problems, 'requiredDecision', result.requiredDecision, L.suggestedAction);
+  checkCount(problems, 'commands', result.commands.length, L.commands);
+  result.commands.forEach((command, i) => {
+    checkLength(problems, `commands.${i}.command`, command.command, L.command);
+    checkLength(problems, `commands.${i}.summary`, command.summary, L.commandSummary);
+    if (command.exitCode !== null && !Number.isSafeInteger(command.exitCode)) {
+      problems.push(`commands.${i}.exitCode is not an integer`);
+    }
+  });
+  return finish(result, problems);
+}
 
 export function resultJsonSchema(purpose: ResultPurpose): Record<string, unknown> {
   const schema = z.toJSONSchema(SHAPES[purpose]) as Record<string, unknown>;
